@@ -59,6 +59,8 @@ import pandas as pd
 import pyranges as pr
 import seaborn as sns
 from matplotlib import pyplot as plt
+from matplotlib.colors import Normalize
+from matplotlib.lines import Line2D
 from scipy import stats
 from statsmodels.nonparametric.smoothers_lowess import lowess
 import statsmodels.api as sm
@@ -476,6 +478,28 @@ def mars_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFra
 
 
 # ---------------------------------------------------------------------------
+# Differential orchestration helpers
+# ---------------------------------------------------------------------------
+
+
+def call_differential_analysis(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFrame:
+    """Select and run the appropriate differential analysis workflow."""
+
+    if counts.empty:
+        raise ValueError("Counts matrix is empty; cannot perform differential analysis")
+    if conditions.nunique() != 2:
+        raise ValueError("Differential analysis requires exactly two experimental conditions")
+
+    replicates_per_condition = conditions.value_counts().min()
+    if replicates_per_condition >= 2:
+        logging.info("Detected replicates per condition; using DESeq2-like analysis")
+        return deseqlike_differential(counts, conditions)
+
+    logging.info("No replicates detected; using MARS analysis")
+    return mars_differential(counts, conditions)
+
+
+# ---------------------------------------------------------------------------
 # Annotation and enrichment
 # ---------------------------------------------------------------------------
 
@@ -579,6 +603,140 @@ def plot_top_heatmap(counts: pd.DataFrame, results: pd.DataFrame, output: Path, 
     save_plot(fig, output)
 
 
+def plot_differential_summary(results: pd.DataFrame, output: Path, *, counts: Optional[pd.DataFrame] = None,
+                              top_n: int = 20) -> None:
+    """Create an overview scatter plot inspired by clusterProfiler dotplots."""
+
+    required = {"padj", "log2FC"}
+    missing = [col for col in required if col not in results.columns]
+    if missing:
+        logging.warning("Cannot draw differential summary plot; missing columns: %s", ", ".join(missing))
+        return
+
+    df = results.replace([np.inf, -np.inf], np.nan).dropna(subset=["padj", "log2FC"])
+    if df.empty:
+        logging.warning("No finite differential results available for summary plot")
+        return
+
+    df = df.sort_values("padj").head(top_n).copy()
+    if df.empty:
+        logging.warning("Differential results contain no entries after filtering for top peaks")
+        return
+
+    padj_nonzero = df.loc[df["padj"] > 0, "padj"]
+    min_nonzero = padj_nonzero.min() if not padj_nonzero.empty else 1e-6
+    df["padj"] = df["padj"].replace(0, min_nonzero / 10)
+    df["Peak"] = df.index.astype(str)
+
+    if "baseMean" in df.columns:
+        base_mean = df["baseMean"].astype(float)
+    elif counts is not None and not counts.empty:
+        base_mean = counts.mean(axis=1).reindex(df.index)
+    else:
+        base_mean = pd.Series(1.0, index=df.index)
+
+    if base_mean.isna().all():
+        base_mean = pd.Series(1.0, index=df.index)
+    base_mean = base_mean.fillna(base_mean.median() if base_mean.notna().any() else 1.0)
+    base_mean = base_mean.clip(lower=1e-3)
+    df["MeanCount"] = base_mean
+    df["MeanCountDisplay"] = np.log10(df["MeanCount"] + 1.0)
+    df["neg_log10_padj"] = -np.log10(df["padj"])
+
+    fc_values = df["log2FC"].astype(float)
+    fc_max = np.nanmax(np.abs(fc_values.to_numpy()))
+    if not np.isfinite(fc_max) or fc_max == 0:
+        fc_max = 1.0
+    hue_norm = Normalize(vmin=-fc_max, vmax=fc_max)
+
+    fig, ax = plt.subplots(figsize=(8, max(4.0, len(df) * 0.45)))
+    size_range = (80, 700)
+    scatter = sns.scatterplot(
+        data=df,
+        x="neg_log10_padj",
+        y="Peak",
+        size="MeanCountDisplay",
+        hue="log2FC",
+        palette="RdBu_r",
+        sizes=size_range,
+        hue_norm=hue_norm,
+        ax=ax,
+        edgecolor="black",
+        linewidth=0.5,
+    )
+    ax.set_xlabel("-log10 adjusted p-value")
+    ax.set_ylabel("Peak")
+    ax.set_title("Differential peak landscape")
+    ax.grid(axis="x", linestyle="--", linewidth=0.5, alpha=0.4)
+
+    sm = plt.cm.ScalarMappable(cmap="RdBu_r", norm=hue_norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, pad=0.02)
+    cbar.set_label("log2 Fold Change")
+
+    min_display, max_display = df["MeanCount"].min(), df["MeanCount"].max()
+    if math.isclose(min_display, max_display):
+        legend_handles = [Line2D([0], [0], marker="o", linestyle="", color="black",
+                                  markersize=math.sqrt(np.mean(size_range)), markerfacecolor="none")]
+        legend_labels = [f"{min_display:.1f}"]
+    else:
+        legend_values = np.linspace(min_display, max_display, num=3)
+        legend_values = np.unique(np.round(legend_values, 2))
+        display_min, display_max = df["MeanCountDisplay"].min(), df["MeanCountDisplay"].max()
+
+        def _size_for(val: float) -> float:
+            display_val = math.log10(val + 1.0)
+            if math.isclose(display_min, display_max):
+                return float(np.mean(size_range))
+            return float(np.interp(display_val, [display_min, display_max], size_range))
+
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="",
+                color="black",
+                markersize=math.sqrt(_size_for(val)),
+                markerfacecolor="none",
+            )
+            for val in legend_values
+        ]
+        legend_labels = [f"{val:.1f}" for val in legend_values]
+
+    size_legend = ax.legend(
+        legend_handles,
+        legend_labels,
+        title="Mean count",
+        loc="lower right",
+        frameon=False,
+    )
+    ax.add_artist(size_legend)
+
+    save_plot(fig, output)
+
+
+def generate_differential_plots(results: pd.DataFrame, counts: pd.DataFrame, output_dir: Path) -> Dict[str, Path]:
+    """Produce all differential analysis visualisations."""
+
+    ensure_directory(output_dir)
+    outputs = {
+        "sample_correlation": output_dir / "sample_correlation.png",
+        "ma": output_dir / "ma_plot.png",
+        "volcano": output_dir / "volcano.png",
+        "top_heatmap": output_dir / "top_peaks_heatmap.png",
+        "summary": output_dir / "differential_summary.png",
+    }
+
+    plot_sample_correlation(counts, outputs["sample_correlation"])
+    plot_ma(results, counts, outputs["ma"])
+    plot_volcano(results, outputs["volcano"])
+    plot_top_heatmap(counts, results, outputs["top_heatmap"])
+    plot_differential_summary(results, outputs["summary"], counts=counts)
+
+    return outputs
+
+
 # ---------------------------------------------------------------------------
 # Metadata persistence
 # ---------------------------------------------------------------------------
@@ -644,22 +802,13 @@ def run_pipeline(args: argparse.Namespace) -> None:
         raise ValueError(f"Counts matrix missing columns for samples: {', '.join(missing_cols)}")
     counts_df = counts_df[[s.sample for s in samples]]
 
-    has_replicates = conditions.value_counts().min() >= 2
-    if has_replicates:
-        logging.info("Detected replicates per condition; using DESeq2-like analysis")
-        diff_res = deseqlike_differential(counts_df, conditions)
-    else:
-        logging.info("No replicates detected; using MARS analysis")
-        diff_res = mars_differential(counts_df, conditions)
+    diff_res = call_differential_analysis(counts_df, conditions)
 
     diff_path = results_dir / "differential_results.tsv"
     diff_res.to_csv(diff_path, sep="\t")
 
     plot_dir = results_dir / "plots"
-    plot_sample_correlation(counts_df, plot_dir / "sample_correlation.png")
-    plot_ma(diff_res, counts_df, plot_dir / "ma_plot.png")
-    plot_volcano(diff_res, plot_dir / "volcano.png")
-    plot_top_heatmap(counts_df, diff_res, plot_dir / "top_peaks_heatmap.png")
+    plot_paths = generate_differential_plots(diff_res, counts_df, plot_dir)
 
     annotation_df = None
     annotation_path = None
@@ -689,12 +838,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "samples": [dataclasses.asdict(s) for s in samples],
         "counts_matrix": str(counts_tsv),
         "differential_results": str(diff_path),
-        "plots": {
-            "volcano": str((plot_dir / "volcano.png")),
-            "ma": str((plot_dir / "ma_plot.png")),
-            "sample_correlation": str((plot_dir / "sample_correlation.png")),
-            "top_heatmap": str((plot_dir / "top_peaks_heatmap.png")),
-        },
+        "plots": {key: str(path) for key, path in plot_paths.items()},
         "annotation": str(annotation_path) if annotation_path else None,
         "enrichr": str(enrichr_path) if enrichr_path else None,
     }
