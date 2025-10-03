@@ -52,7 +52,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 import numpy as np
 import pandas as pd
@@ -62,7 +62,6 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 from scipy import stats
-from statsmodels.nonparametric.smoothers_lowess import lowess
 
 try:
     from pydeseq2.dds import DeseqDataSet
@@ -127,6 +126,67 @@ def run_command(cmd: Sequence[str], *, workdir: Optional[Path] = None, log: bool
 def ensure_directory(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _bam_index_candidates(bam: Path) -> List[Path]:
+    candidates: List[Path] = []
+    candidates.append(Path(f"{bam}.bai"))
+    if bam.suffix:
+        candidates.append(bam.with_suffix(".bai"))
+    # Remove duplicates while preserving order
+    seen: Set[Path] = set()
+    unique: List[Path] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            unique.append(candidate)
+            seen.add(candidate)
+    return unique
+
+
+def ensure_bam_index(bam: Path, samtools_path: str) -> None:
+    for candidate in _bam_index_candidates(bam):
+        if candidate.exists():
+            return
+    logging.info("Indexing BAM for library size estimation: %s", bam)
+    run_command([samtools_path, "index", str(bam)])
+
+
+def bam_total_mapped_reads(bam: Path, samtools_path: str) -> int:
+    ensure_bam_index(bam, samtools_path)
+    result = subprocess.run(
+        [samtools_path, "idxstats", str(bam)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"samtools idxstats failed for {bam} with exit code {result.returncode}: {result.stderr.strip()}"
+        )
+
+    total = 0
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) < 3:
+            continue
+        try:
+            total += int(fields[2])
+        except ValueError:
+            continue
+
+    if total <= 0:
+        raise ValueError(f"Unable to determine mapped reads for BAM {bam}")
+    return total
+
+
+def compute_library_sizes(samples: Sequence[SampleEntry], samtools_path: str) -> pd.Series:
+    sizes = {}
+    for sample in samples:
+        logging.info("Estimating library size for sample %s", sample.sample)
+        sizes[sample.sample] = bam_total_mapped_reads(sample.bam, samtools_path)
+    return pd.Series(sizes, dtype=float)
 
 
 def read_table(path: Path) -> pd.DataFrame:
@@ -399,44 +459,98 @@ def pydeseq2_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.Dat
     return result
 
 
-def mars_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFrame:
+def mars_differential(
+    counts: pd.DataFrame, conditions: pd.Series, library_sizes: pd.Series
+) -> pd.DataFrame:
     """Implement the MARS method for designs without replicates."""
 
     logging.info("Running MARS differential analysis (no replicates)")
-    unique_conditions = conditions.unique()
+    samples = counts.columns.tolist()
+    cond_series = conditions.loc[samples]
+    unique_conditions = list(dict.fromkeys(cond_series.tolist()))
     if len(unique_conditions) != 2:
         raise ValueError("MARS method requires exactly two conditions")
 
-    cond_a, cond_b = unique_conditions
-    counts_a = counts.loc[:, conditions[conditions == cond_a].index].sum(axis=1)
-    counts_b = counts.loc[:, conditions[conditions == cond_b].index].sum(axis=1)
+    reference, contrast = unique_conditions
+    contrast_cols = cond_series[cond_series == contrast].index
+    reference_cols = cond_series[cond_series == reference].index
 
-    x = counts_a.to_numpy() + 1.0
-    y = counts_b.to_numpy() + 1.0
-    M = np.log2(y / x)
-    A = 0.5 * np.log2(x * y)
+    if contrast_cols.empty or reference_cols.empty:
+        raise ValueError("Each condition must contribute at least one sample for MARS analysis")
 
-    fitted = lowess(M, A, frac=0.3, return_sorted=False)
-    residuals = M - fitted
+    contrast_counts = counts.loc[:, contrast_cols].sum(axis=1)
+    reference_counts = counts.loc[:, reference_cols].sum(axis=1)
 
-    # Estimate variance as a smooth function of A using binning
-    bins = max(10, int(np.sqrt(len(A))))
-    df = pd.DataFrame({"A": A, "residual": residuals})
-    df["bin"] = pd.cut(df["A"], bins, duplicates="drop")
-    var_by_bin = df.groupby("bin")["residual"].var().fillna(df["residual"].var())
-    bin_centers = df.groupby("bin")["A"].mean()
-    # Interpolate variance for each observation
-    interp_var = np.interp(A, bin_centers.fillna(0).to_numpy(), var_by_bin.to_numpy(), left=var_by_bin.iloc[0], right=var_by_bin.iloc[-1])
-    z_scores = residuals / np.sqrt(interp_var + 1e-6)
-    pvals = 2 * stats.norm.sf(np.abs(z_scores))
+    if not isinstance(library_sizes, pd.Series):
+        library_sizes = pd.Series(library_sizes)
 
-    res_df = pd.DataFrame({
-        "Peak": counts.index,
-        "log2FC": M,
-        "A": A,
-        "pvalue": pvals,
-        "log2FC_shrunk": M * (interp_var / (interp_var + 1.0)),
-    }).set_index("Peak")
+    library_sizes = library_sizes.reindex(samples)
+    if library_sizes.isna().any():
+        missing = library_sizes[library_sizes.isna()].index.tolist()
+        raise ValueError(
+            "Library size information missing for samples: " + ", ".join(missing)
+        )
+
+    contrast_total = float(library_sizes.loc[list(contrast_cols)].sum())
+    reference_total = float(library_sizes.loc[list(reference_cols)].sum())
+
+    if contrast_total <= 0 or reference_total <= 0:
+        raise ValueError("Total read counts must be positive for both conditions in MARS analysis")
+
+    c1 = contrast_counts.to_numpy(dtype=float)
+    c2 = reference_counts.to_numpy(dtype=float)
+
+    with np.errstate(divide="ignore"):
+        log2_c1 = np.log2(c1)
+        log2_c2 = np.log2(c2)
+
+    valid_mask = np.isfinite(log2_c1) & np.isfinite(log2_c2)
+
+    M = np.full_like(c1, np.nan, dtype=float)
+    A = np.full_like(c1, np.nan, dtype=float)
+    M[valid_mask] = log2_c1[valid_mask] - log2_c2[valid_mask]
+    A[valid_mask] = 0.5 * (log2_c1[valid_mask] + log2_c2[valid_mask])
+
+    sqrt_total = math.sqrt(contrast_total * reference_total)
+    p = np.full_like(M, np.nan, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p[valid_mask] = np.exp2(A[valid_mask]) / sqrt_total
+
+    epsilon = 1e-12
+    if np.any(valid_mask):
+        p_valid = p[valid_mask]
+        p_valid = np.clip(p_valid, epsilon, 1 - epsilon)
+        p[valid_mask] = p_valid
+
+    log_factor = math.log(2.0)
+    denom = (contrast_total + reference_total) * p
+    with np.errstate(divide="ignore", invalid="ignore"):
+        variance = 4.0 * (1.0 - p) / (denom * (log_factor ** 2))
+    sd = np.sqrt(variance)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean = (np.log(contrast_total * p) - np.log(reference_total * p)) / log_factor
+
+    z_scores = np.full_like(M, np.nan, dtype=float)
+    valid_z = valid_mask & np.isfinite(sd) & (sd > 0)
+    z_scores[valid_z] = (M[valid_z] - mean[valid_z]) / sd[valid_z]
+
+    pvals = np.ones_like(M, dtype=float)
+    finite_z = np.isfinite(z_scores)
+    pvals[finite_z] = 2.0 * stats.norm.sf(np.abs(z_scores[finite_z]))
+
+    log2fc_output = np.log2((c1 + 0.5) / (c2 + 0.5))
+
+    res_df = pd.DataFrame(
+        {
+            "Peak": counts.index,
+            "log2FC": log2fc_output,
+            "A": A,
+            "M": M,
+            "pvalue": pvals,
+            "log2FC_shrunk": log2fc_output,
+        }
+    ).set_index("Peak")
     res_df["padj"] = benjamini_hochberg(res_df["pvalue"]).fillna(1.0)
     res_df["method"] = "mars"
     return res_df
@@ -447,7 +561,9 @@ def mars_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFra
 # ---------------------------------------------------------------------------
 
 
-def call_differential_analysis(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFrame:
+def call_differential_analysis(
+    counts: pd.DataFrame, conditions: pd.Series, library_sizes: pd.Series
+) -> pd.DataFrame:
     """Select and run the appropriate differential analysis workflow."""
 
     if counts.empty:
@@ -461,7 +577,7 @@ def call_differential_analysis(counts: pd.DataFrame, conditions: pd.Series) -> p
         return pydeseq2_differential(counts, conditions)
 
     logging.info("No replicates detected; using MARS analysis")
-    return mars_differential(counts, conditions)
+    return mars_differential(counts, conditions, library_sizes)
 
 
 # ---------------------------------------------------------------------------
@@ -718,15 +834,35 @@ def save_metadata(metadata: Dict, output_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_pipeline(args: argparse.Namespace) -> None:
-    samples = load_samples(Path(args.metadata))
+def run_pipeline(
+    args: argparse.Namespace,
+    *,
+    samples: Optional[List[SampleEntry]] = None,
+    metadata_path: Optional[Path] = None,
+) -> None:
+    if samples is None:
+        metadata_value = getattr(args, "metadata", None)
+        if metadata_value is None:
+            raise ValueError("Metadata file must be provided when samples are not supplied explicitly")
+        metadata_path = Path(metadata_value)
+        samples = load_samples(metadata_path)
+    else:
+        for sample in samples:
+            sample.ensure_paths()
+
     conditions = pd.Series({s.sample: s.condition for s in samples})
 
-    required_cmds = ["multiBamSummary"]
+    required_cmds = ["multiBamSummary", "samtools"]
     needs_peak_calling = any(sample.peaks is None for sample in samples)
     if needs_peak_calling:
         required_cmds.append("macs2")
     ensure_commands(required_cmds)
+
+    samtools_path = shutil.which("samtools")
+    if samtools_path is None:  # pragma: no cover - defensive (ensure_commands guards)
+        raise RuntimeError("samtools not found on PATH after validation")
+
+    library_sizes = compute_library_sizes(samples, samtools_path)
 
     macs2_params = {
         "genome": args.macs2_genome,
@@ -812,7 +948,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         raise ValueError(f"Counts matrix missing columns for samples: {', '.join(missing_cols)}")
     counts_df = counts_df[[s.sample for s in samples]]
 
-    diff_res = call_differential_analysis(counts_df, conditions)
+    diff_res = call_differential_analysis(counts_df, conditions, library_sizes)
 
     diff_path = results_dir / "differential_results.tsv"
     diff_res.to_csv(diff_path, sep="\t")
@@ -851,18 +987,22 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 "bam": str(sample.bam),
                 "peaks": str(sample.peaks) if sample.peaks is not None else None,
                 "peak_type": sample.peak_type,
+                "library_size": float(library_sizes.loc[sample.sample]),
             }
         )
 
+    args_dict = {key: value for key, value in vars(args).items() if key != "samples"}
     metadata = {
         "timestamp": datetime.utcnow().isoformat(),
-        "args": vars(args),
+        "args": args_dict,
+        "metadata_sheet": str(metadata_path) if metadata_path else None,
         "samples": sample_metadata,
         "counts_matrix": str(counts_tsv),
         "differential_results": str(diff_path),
         "plots": {key: str(path) for key, path in plot_paths.items()},
         "annotation": str(annotation_path) if annotation_path else None,
         "enrichr": str(enrichr_path) if enrichr_path else None,
+        "library_sizes": {name: float(value) for name, value in library_sizes.to_dict().items()},
     }
     save_metadata(metadata, results_dir / "metadata.json")
 
@@ -871,22 +1011,89 @@ def run_pipeline(args: argparse.Namespace) -> None:
 # Argument parser
 # ---------------------------------------------------------------------------
 
+def _build_condition_samples(
+    condition: str,
+    bam_files: Sequence[str],
+    peak_files: Optional[Sequence[str]],
+    used_names: Set[str],
+) -> List[SampleEntry]:
+    if not bam_files:
+        raise ValueError(f"No BAM files supplied for condition {condition}")
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="CUT&Tag / ChIP-seq differential analysis pipeline",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("--metadata", required=True, help="Sample sheet (TSV/CSV)")
+    if peak_files is not None and len(peak_files) not in {0, len(bam_files)}:
+        raise ValueError(
+            f"Number of peak files for condition {condition} must match the number of BAM files"
+        )
+
+    entries: List[SampleEntry] = []
+    for idx, bam in enumerate(bam_files):
+        bam_path = Path(bam)
+        base_name = bam_path.stem or f"{condition}_rep{idx + 1}"
+        candidate = base_name
+        suffix = 1
+        while candidate in used_names:
+            suffix += 1
+            candidate = f"{base_name}_{suffix}"
+        used_names.add(candidate)
+
+        peak_path = None
+        if peak_files:
+            peak_value = peak_files[idx]
+            if peak_value not in {"", "-", "None", "none", "NA", "na"}:
+                peak_path = Path(peak_value)
+
+        entries.append(
+            SampleEntry(
+                sample=candidate,
+                condition=condition,
+                bam=bam_path,
+                peaks=peak_path,
+                peak_type="auto",
+            )
+        )
+
+    return entries
+
+
+def build_runmode_samples(args: argparse.Namespace) -> List[SampleEntry]:
+    a_peaks = args.a_peaks or []
+    b_peaks = args.b_peaks or []
+
+    used_names: Set[str] = set()
+    samples = _build_condition_samples(args.condition_a, args.a_bams, a_peaks, used_names)
+    samples.extend(_build_condition_samples(args.condition_b, args.b_bams, b_peaks, used_names))
+    return samples
+
+
+def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", default="results", help="Output directory")
     parser.add_argument("--peak-dir", default="peaks", help="Directory for peak calls")
-    parser.add_argument("--peak-type", default="narrow", choices=["narrow", "broad", "summit"],
-                        help="Default peak type when calling MACS2")
-    parser.add_argument("--summit-extension", type=int, default=250, help="Extension for summits/narrow peaks (bp)")
-    parser.add_argument("--min-overlap", type=int, default=2, help="Minimum samples required for consensus peak")
+    parser.add_argument(
+        "--peak-type",
+        default="narrow",
+        choices=["narrow", "broad", "summit"],
+        help="Default peak type when calling MACS2",
+    )
+    parser.add_argument(
+        "--summit-extension",
+        type=int,
+        default=250,
+        help="Extension for summits/narrow peaks (bp)",
+    )
+    parser.add_argument(
+        "--min-overlap",
+        type=int,
+        default=2,
+        help="Minimum samples required for consensus peak",
+    )
     parser.add_argument("--macs2-genome", default="hs", help="MACS2 genome size (e.g. hs, mm, 2.7e9)")
     parser.add_argument("--macs2-qvalue", type=float, default=0.01, help="MACS2 q-value cutoff")
-    parser.add_argument("--macs2-extra", nargs=argparse.REMAINDER, default=[], help="Additional arguments for MACS2")
+    parser.add_argument(
+        "--macs2-extra",
+        nargs=argparse.REMAINDER,
+        default=[],
+        help="Additional arguments for MACS2",
+    )
     parser.add_argument(
         "--threads",
         type=int,
@@ -897,6 +1104,47 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enrichr", action="store_true", help="Run Enrichr GO Biological Process analysis")
     parser.add_argument("--enrichr-top", type=int, default=200, help="Number of top peaks for enrichment")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="peakforge",
+        description="CUT&Tag / ChIP-seq differential analysis pipeline",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    tsv_parser = subparsers.add_parser(
+        "tsvmode",
+        help="Run the pipeline using a metadata TSV/CSV sheet",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    tsv_parser.add_argument("metadata", help="Sample sheet (TSV/CSV)")
+    add_common_arguments(tsv_parser)
+
+    run_parser = subparsers.add_parser(
+        "runmode",
+        help="Run the pipeline by specifying BAM/peak files directly",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    run_parser.add_argument("--condition-a", required=True, help="Reference condition label")
+    run_parser.add_argument("--a-bams", nargs="+", required=True, help="BAM files for condition A")
+    run_parser.add_argument(
+        "--a-peaks",
+        nargs="*",
+        default=None,
+        help="Optional peak files aligned with --a-bams",
+    )
+    run_parser.add_argument("--condition-b", required=True, help="Contrast condition label")
+    run_parser.add_argument("--b-bams", nargs="+", required=True, help="BAM files for condition B")
+    run_parser.add_argument(
+        "--b-peaks",
+        nargs="*",
+        default=None,
+        help="Optional peak files aligned with --b-bams",
+    )
+    add_common_arguments(run_parser)
+
     return parser
 
 
@@ -908,11 +1156,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO),
-                        format="[%(asctime)s] %(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="[%(asctime)s] %(levelname)s: %(message)s",
+    )
 
     try:
-        run_pipeline(args)
+        if args.command == "tsvmode":
+            metadata_path = Path(args.metadata)
+            samples = load_samples(metadata_path)
+            run_pipeline(args, samples=samples, metadata_path=metadata_path)
+        elif args.command == "runmode":
+            samples = build_runmode_samples(args)
+            run_pipeline(args, samples=samples, metadata_path=None)
+        else:  # pragma: no cover - defensive guard
+            parser.print_help()
+            sys.exit(1)
     except Exception as exc:  # pragma: no cover - CLI exception reporting
         logging.error("Pipeline failed: %s", exc)
         sys.exit(1)

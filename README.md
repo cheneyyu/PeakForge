@@ -28,7 +28,7 @@ It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads,
     - Requires PyDESeq2 to be installed when replicate designs are detected.
   - **MARS (DEGseq, Likun Wang 2010)** (without replicates):
     - Supports 1 vs 1, or pooled multiple vs multiple samples.
-    - MA-plot based exact binomial test.
+    - Uses `samtools idxstats` to derive per-sample library sizes from the full BAM before applying the MA-plot random sampling test.
   - Consolidated differential results (`differential_results.tsv`) for downstream interpretation.
 
 - **Annotation & Enrichment (optional)**
@@ -53,7 +53,7 @@ Requirements:
 - External tools:
   - [MACS2](https://github.com/macs3-project/MACS) (for peak calling)
   - [deepTools](https://deeptools.readthedocs.io/en/develop/) (for multiBamSummary)
-  - [samtools](http://www.htslib.org/) (for BAM indexing)
+  - [samtools](http://www.htslib.org/) (for BAM indexing and library size estimation)
 
 Install dependencies:
 
@@ -67,7 +67,7 @@ conda install -c bioconda macs2 deeptools samtools
 ## 🧪 Quick start
 
 1. Prepare a sample sheet (`samples.tsv`) describing your BAM files and optional peak calls.
-2. Run the pipeline with `python chipdiff.py --metadata samples.tsv --output-dir results`.
+2. Run the pipeline with `./peakforge tsvmode samples.tsv --output-dir results` (or `python chipdiff.py tsvmode samples.tsv --output-dir results`).
 3. Inspect the figures and result tables written to the `results/` directory.
 
 ### Sample sheet format
@@ -83,8 +83,7 @@ The sheet can be tab- or comma-delimited and must include the columns `sample`, 
 ### Example command
 
 ```bash
-python chipdiff.py \
-  --metadata samples.tsv \
+./peakforge tsvmode samples.tsv \
   --output-dir results \
   --peak-dir peaks \
   --min-overlap 2 \
@@ -169,11 +168,10 @@ bash example/run_example2.sh \
   --b-peaks example/results/2v2/peaks/HepG2_rep1_summits.bed
 ```
 
-The script generates a temporary metadata sheet that points to the supplied
-paths and then invokes `chipdiff.py` with sensible defaults (including
-`--threads 16`, which maps to `multiBamSummary --numberOfProcessors`). Provide
-peak files to skip MACS2 entirely; omit them if you want the pipeline to call
-peaks from your BAMs on the fly.
+The script calls `peakforge runmode` with the provided paths and sensible
+defaults (including `--threads 16`, which maps to `multiBamSummary
+--numberOfProcessors`). Provide peak files to skip MACS2 entirely; omit them if
+you want the pipeline to call peaks from your BAMs on the fly.
 
 ### Example 3: 2v2 quick start
 
@@ -213,4 +211,4 @@ analysis.
 
 ## 🔧 Command reference
 
-Run `python chipdiff.py --help` to see all available options (peak calling parameters, threading, annotation, and enrichment settings).
+Run `./peakforge --help` (or `python chipdiff.py --help`) to see all available options (peak calling parameters, threading, annotation, and enrichment settings).
