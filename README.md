@@ -16,6 +16,7 @@ It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads,
   - Supports **minOverlap** (e.g. ≥2 samples required).
   - Summit/narrow peaks: extend ±250bp windows (adjustable).
   - Broad peaks: merged directly.
+  - Reuse an existing BED with `--consensus-peaks` to ensure identical regions across runs.
 
 - **Counting**
   - Uses **deepTools** `multiBamSummary BED-file` for counts matrix.
@@ -28,7 +29,7 @@ It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads,
     - Requires PyDESeq2 to be installed when replicate designs are detected.
   - **MARS (DEGseq, Likun Wang 2010)** (without replicates):
     - Supports 1 vs 1, or pooled multiple vs multiple samples.
-    - MA-plot based exact binomial test.
+    - Uses `samtools idxstats` to derive per-sample library sizes from the full BAM before applying the MA-plot random sampling test.
   - Consolidated differential results (`differential_results.tsv`) for downstream interpretation.
 
 - **Annotation & Enrichment (optional)**
@@ -53,7 +54,7 @@ Requirements:
 - External tools:
   - [MACS2](https://github.com/macs3-project/MACS) (for peak calling)
   - [deepTools](https://deeptools.readthedocs.io/en/develop/) (for multiBamSummary)
-  - [samtools](http://www.htslib.org/) (for BAM indexing)
+  - [samtools](http://www.htslib.org/) (for BAM indexing and library size estimation)
 
 Install dependencies:
 
@@ -67,7 +68,7 @@ conda install -c bioconda macs2 deeptools samtools
 ## 🧪 Quick start
 
 1. Prepare a sample sheet (`samples.tsv`) describing your BAM files and optional peak calls.
-2. Run the pipeline with `python chipdiff.py --metadata samples.tsv --output-dir results`.
+2. Run the pipeline with `./peakforge tsvmode samples.tsv --output-dir results` (or `python chipdiff.py tsvmode samples.tsv --output-dir results`).
 3. Inspect the figures and result tables written to the `results/` directory.
 
 ### Sample sheet format
@@ -83,8 +84,7 @@ The sheet can be tab- or comma-delimited and must include the columns `sample`, 
 ### Example command
 
 ```bash
-python chipdiff.py \
-  --metadata samples.tsv \
+./peakforge tsvmode samples.tsv \
   --output-dir results \
   --peak-dir peaks \
   --min-overlap 2 \
@@ -115,7 +115,7 @@ To help you get started quickly, the repository ships with an end-to-end example
 - **K562 MYC** – replicates [`ENCFF975ETI.bam`, `ENCFF380OWL.bam`]
 - **HepG2 MYC** – replicates [`ENCFF315AUW.bam`, `ENCFF987GJQ.bam`]
 
-The scripts in `example/` orchestrate downloading the public alignments, executing the PeakForge pipeline for the 2 vs 2 comparison, repeating all four possible 1 vs 1 contrasts, and benchmarking how closely the 1 vs 1 runs reproduce the 2 vs 2 signal. The dataset comprises four compact (downsampled) BAM files; make sure all four are present before running `run_pipeline.sh` so the concordance summaries have the expected inputs.
+The scripts in `example/` orchestrate downloading the public alignments and executing the PeakForge pipeline for the 2 vs 2 comparison. The dataset comprises four compact (downsampled) BAM files; make sure all four are present before running `run_pipeline.sh` so the analysis has the expected inputs.
 
 1. **Prepare the inputs**
    ```bash
@@ -132,14 +132,7 @@ The scripts in `example/` orchestrate downloading the public alignments, executi
    ```bash
    bash example/run_pipeline.sh
    ```
-   This executes the 2v2 workflow plus four one-vs-one runs, storing results in `example/results/`.
-
-3. **Inspect reproducibility reports**
-   `example/analyze_replicates.py` (invoked automatically by `run_pipeline.sh`) aggregates:
-   - peak-level overlap precision/recall, F1, bp-wise Jaccard, and sign concordance;
-   - top-N recovery of the most significant 2v2 peaks;
- - Spearman correlations of log2 fold-changes between the 2v2 run and each 1v1 replicate pairing;
-  - a union log2FC matrix (`global_log2fc_matrix.tsv`) for downstream clustering/QC.
+   This executes the 2v2 workflow and stores results in `example/results/`.
 
 All scripts respect relative paths, so you can copy the `example/` directory into your own project and customize it as needed.
 
@@ -166,19 +159,21 @@ bash example/run_example2.sh \
   --a-peaks example/results/2v2/peaks/K562_rep1_summits.bed \
   --condition-b HepG2 \
   --b-bams example/data/HepG2_rep1.bam \
-  --b-peaks example/results/2v2/peaks/HepG2_rep1_summits.bed
+  --b-peaks example/results/2v2/peaks/HepG2_rep1_summits.bed \
+  --consensus-peaks example/results/2v2/consensus_peaks.bed
 ```
 
-The script generates a temporary metadata sheet that points to the supplied
-paths and then invokes `chipdiff.py` with sensible defaults (including
-`--threads 16`, which maps to `multiBamSummary --numberOfProcessors`). Provide
-peak files to skip MACS2 entirely; omit them if you want the pipeline to call
-peaks from your BAMs on the fly.
+The script calls `peakforge runmode` with the provided paths and sensible
+defaults (including `--threads 16`, which maps to `multiBamSummary
+--numberOfProcessors`). Provide peak files to skip MACS2 entirely; omit them if
+you want the pipeline to call peaks from your BAMs on the fly. Supplying
+`--consensus-peaks` reuses the same peak set produced by the 2 vs 2 workflow so
+the MARS comparison stays on the identical genomic intervals.
 
 ### Example 3: 2v2 quick start
 
 Once the ENCODE dataset is downloaded, you can launch the bundled 2 vs 2
-workflow—plus all pairwise 1 vs 1 comparisons—via:
+workflow via:
 
 ```bash
 bash example/run_pipeline.sh
@@ -186,8 +181,9 @@ bash example/run_pipeline.sh
 
 This script reads `example/data/metadata.tsv`, runs the full PeakForge pipeline
 with a default of 16 `multiBamSummary` threads, and stores results under
-`example/results/`. Reproducibility reports are written to
-`example/results/reports/`.
+`example/results/`. The generated consensus (`example/results/2v2/consensus_peaks.bed`)
+can be passed to future `peakforge` runs with `--consensus-peaks` for consistent
+peak definitions.
 
 ### Example 4: 2v2 with existing BAM/peak files
 
@@ -213,4 +209,4 @@ analysis.
 
 ## 🔧 Command reference
 
-Run `python chipdiff.py --help` to see all available options (peak calling parameters, threading, annotation, and enrichment settings).
+Run `./peakforge --help` (or `python chipdiff.py --help`) to see all available options (peak calling parameters, threading, annotation, and enrichment settings).

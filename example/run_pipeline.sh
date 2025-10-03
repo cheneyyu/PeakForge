@@ -53,9 +53,9 @@ run_chipdiff() {
   local output_dir="$2"
   shift 2
   mkdir -p "${output_dir}"
-  echo "[chipdiff] ${metadata_path} -> ${output_dir}"
+  echo "[peakforge] ${metadata_path} -> ${output_dir}"
   python "${PROJECT_ROOT}/chipdiff.py" \
-    --metadata "${metadata_path}" \
+    tsvmode "${metadata_path}" \
     --output-dir "${output_dir}" \
     --peak-dir "${output_dir}/peaks" \
     --min-overlap 2 \
@@ -67,28 +67,5 @@ run_chipdiff() {
 MAIN_DIR="${RESULTS_ROOT}/2v2"
 run_chipdiff "${METADATA}" "${MAIN_DIR}"
 
-ONE_VS_ONE_RESULTS=()
-for sample_a in "${REPS_A[@]}"; do
-  for sample_b in "${REPS_B[@]}"; do
-    tmp_metadata="$(mktemp "${RESULTS_ROOT}/1v1_${sample_a}_vs_${sample_b}_XXXX.tsv")"
-    {
-      printf 'sample\tcondition\tbam\n'
-      printf '%s\t%s\t%s\n' "${sample_a}" "${COND_A}" "${SAMPLE_BAMS[${sample_a}]}"
-      printf '%s\t%s\t%s\n' "${sample_b}" "${COND_B}" "${SAMPLE_BAMS[${sample_b}]}"
-    } > "${tmp_metadata}"
-    out_dir="${RESULTS_ROOT}/1v1_${sample_a}_vs_${sample_b}"
-    run_chipdiff "${tmp_metadata}" "${out_dir}" --min-overlap 1
-    ONE_VS_ONE_RESULTS+=("${out_dir}/differential_results.tsv")
-    rm -f "${tmp_metadata}"
-  done
-done
-
-REPORT_DIR="${RESULTS_ROOT}/reports"
-python "${ROOT}/analyze_replicates.py" \
-  --main "${MAIN_DIR}/differential_results.tsv" \
-  --one-vs-one "${ONE_VS_ONE_RESULTS[@]}" \
-  --output-dir "${REPORT_DIR}" \
-  --alpha "${ALPHA:-0.05}" \
-  --lfc "${LFC_THRESHOLD:-1.0}"
-
-echo "All analyses completed. Review ${REPORT_DIR} for reproducibility summaries."
+echo "All analyses completed. Review ${MAIN_DIR} for results."
+echo "Consensus peaks saved to ${MAIN_DIR}/consensus_peaks.bed (pass via --consensus-peaks for follow-up runs)."
