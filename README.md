@@ -22,13 +22,15 @@ It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads,
   - Exports counts matrix as `.tsv`.
 
 - **Differential analysis**
-  - **DESeq2-like**:
+  - Automatically routes to the appropriate workflow based on replicate availability.
+  - **DESeq2-like** (with replicates):
     - Median-ratio size factor normalization.
     - Dispersion trend fitting + empirical Bayes shrinkage.
     - Wald test with LFC shrinkage (ridge-EB).
-  - **MARS (DEGseq, Likun Wang 2010)**:
+  - **MARS (DEGseq, Likun Wang 2010)** (without replicates):
     - Supports 1 vs 1, or pooled multiple vs multiple samples.
     - MA-plot based exact binomial test.
+  - Consolidated differential results (`differential_results.tsv`) for downstream interpretation.
 
 - **Annotation & Enrichment (optional)**
   - Annotate consensus peaks with nearest genes (via GTF).
@@ -97,8 +99,9 @@ This run will call peaks (if needed), build consensus peaks across samples, comp
 Key files generated under `results/` include:
 
 - `counts.tsv` – consensus peak counts matrix.
-- `deseq2_like.tsv` / `mars.tsv` – differential analysis tables.
+- `differential_results.tsv` – unified differential analysis table (method annotated per peak).
 - `plots/` – volcano, MA, correlation, and heatmap figures.
+- `plots/differential_summary.png` – clusterProfiler-style overview of significant peaks.
 - `metadata.json` – run configuration and provenance metadata.
 
 ---
