@@ -108,10 +108,12 @@ Key files generated under `results/` include:
 
 ## 🧬 ENCODE hg38 2v2 example dataset
 
-To help you get started quickly, the repository ships with an end-to-end example based on a widely used ENCODE H3K27ac dataset (hg38):
+To help you get started quickly, the repository ships with an end-to-end example based on a released ENCODE MYC ChIP-seq dataset generated in the HepG2 cell line (GRCh38 assembly):
 
-- **GM12878 H3K27ac** – ENCSR000AKP
-- **K562 H3K27ac** – ENCSR000AKO
+- **Experiment A (MYC ChIP)** – ENCFF975ETI, ENCFF380OWL
+- **Experiment B (MYC ChIP)** – ENCFF315AUW, ENCFF987GJQ
+
+The two experiments capture independent MYC ChIP-seq replicates on the same HepG2 background, making them ideal for demonstrating PeakForge's replicate-aware consensus building and reproducibility reporting.
 
 The scripts in `example/` orchestrate downloading the public alignments, executing the PeakForge pipeline for the 2 vs 2 comparison, repeating all four possible 1 vs 1 contrasts, and benchmarking how closely the 1 vs 1 runs reproduce the 2 vs 2 signal.
 
@@ -120,7 +122,7 @@ The scripts in `example/` orchestrate downloading the public alignments, executi
    # Prints the curl commands by default (DRY_RUN=1)
    bash example/download_encode.sh
 
-   # Actually download the BAMs (~15 GB total)
+   # Actually download the BAMs (~11 GB total)
    DRY_RUN=0 bash example/download_encode.sh
    ```
    Downloads are written to `example/data/` and a manifest (`encode_manifest.tsv`) is generated alongside the tab-delimited sample sheet (`metadata.tsv`).
