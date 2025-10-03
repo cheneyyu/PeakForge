@@ -54,12 +54,13 @@ Requirements:
 - External tools:
   - [MACS2](https://github.com/macs3-project/MACS) (for peak calling)
   - [deepTools](https://deeptools.readthedocs.io/en/develop/) (for multiBamSummary)
+  - [samtools](http://www.htslib.org/) (for BAM indexing)
 
 Install dependencies:
 
 ```bash
 pip install numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy
-conda install -c bioconda macs2 deeptools
+conda install -c bioconda macs2 deeptools samtools
 ```
 
 ---
@@ -113,7 +114,7 @@ To help you get started quickly, the repository ships with an end-to-end example
 - **K562 MYC** – replicates [`ENCFF975ETI.bam`, `ENCFF380OWL.bam`]
 - **HepG2 MYC** – replicates [`ENCFF315AUW.bam`, `ENCFF987GJQ.bam`]
 
-The scripts in `example/` orchestrate downloading the public alignments, executing the PeakForge pipeline for the 2 vs 2 comparison, repeating all four possible 1 vs 1 contrasts, and benchmarking how closely the 1 vs 1 runs reproduce the 2 vs 2 signal.
+The scripts in `example/` orchestrate downloading the public alignments, executing the PeakForge pipeline for the 2 vs 2 comparison, repeating all four possible 1 vs 1 contrasts, and benchmarking how closely the 1 vs 1 runs reproduce the 2 vs 2 signal. The dataset comprises four compact (downsampled) BAM files; make sure all four are present before running `run_pipeline.sh` so the concordance summaries have the expected inputs.
 
 1. **Prepare the inputs**
    ```bash
@@ -124,6 +125,7 @@ The scripts in `example/` orchestrate downloading the public alignments, executi
    DRY_RUN=0 bash example/download_encode.sh
    ```
    Downloads are written to `example/data/` and a manifest (`encode_manifest.tsv`) is generated alongside the tab-delimited sample sheet (`metadata.tsv`).
+   When `samtools` is available on `PATH`, the script also creates `.bai` indices for each BAM so the downstream counting step can stream efficiently. (If `samtools` is missing a warning is emitted.)
 
 2. **Run the complete analysis**
    ```bash

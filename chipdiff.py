@@ -47,6 +47,7 @@ import dataclasses
 import json
 import logging
 import math
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -96,6 +97,16 @@ class SampleEntry:
 # ---------------------------------------------------------------------------
 # File and command helpers
 # ---------------------------------------------------------------------------
+
+
+def ensure_commands(commands: Sequence[str]) -> None:
+    missing = [cmd for cmd in commands if shutil.which(cmd) is None]
+    if missing:
+        joined = ", ".join(sorted(missing))
+        raise RuntimeError(
+            "Missing required command(s): "
+            f"{joined}. Please install them (e.g. via 'conda install -c bioconda macs2 deeptools')."
+        )
 
 
 def run_command(cmd: Sequence[str], *, workdir: Optional[Path] = None, log: bool = True) -> None:
@@ -756,6 +767,12 @@ def save_metadata(metadata: Dict, output_path: Path) -> None:
 def run_pipeline(args: argparse.Namespace) -> None:
     samples = load_samples(Path(args.metadata))
     conditions = pd.Series({s.sample: s.condition for s in samples})
+
+    required_cmds = ["multiBamSummary"]
+    needs_peak_calling = any(sample.peaks is None for sample in samples)
+    if needs_peak_calling:
+        required_cmds.append("macs2")
+    ensure_commands(required_cmds)
 
     macs2_params = {
         "genome": args.macs2_genome,
