@@ -53,9 +53,9 @@ run_chipdiff() {
   local output_dir="$2"
   shift 2
   mkdir -p "${output_dir}"
-  echo "[chipdiff] ${metadata_path} -> ${output_dir}"
+  echo "[peakforge] ${metadata_path} -> ${output_dir}"
   python "${PROJECT_ROOT}/chipdiff.py" \
-    --metadata "${metadata_path}" \
+    tsvmode "${metadata_path}" \
     --output-dir "${output_dir}" \
     --peak-dir "${output_dir}/peaks" \
     --min-overlap 2 \
