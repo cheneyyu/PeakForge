@@ -21,6 +21,8 @@ Optional arguments:
                              narrowPeak, or broadPeak). When provided, MACS2
                              is skipped for those samples.
   --b-peaks FILE [FILE ...]  Peak files aligned with --b-bams.
+  --consensus-peaks FILE     Reuse an existing consensus BED instead of
+                             rebuilding peaks.
   --output-dir DIR           Output directory (default: example/results/example2)
   --threads N                Threads for multiBamSummary (default: 16)
   --min-overlap N            Minimum samples required for consensus peaks (default: 2)
@@ -65,6 +67,7 @@ A_BAMS=()
 B_BAMS=()
 A_PEAKS=()
 B_PEAKS=()
+CONSENSUS_PEAKS=""
 
 if [[ $# -eq 0 ]]; then
   show_help
@@ -108,6 +111,10 @@ while [[ $# -gt 0 ]]; do
         B_PEAKS+=("$1")
         shift
       done
+      ;;
+    --consensus-peaks)
+      CONSENSUS_PEAKS="$2"
+      shift 2
       ;;
     --output-dir)
       OUTPUT_DIR="$2"
@@ -170,47 +177,41 @@ if [[ ${#B_PEAKS[@]} -gt 0 && ${#B_PEAKS[@]} -ne ${#B_BAMS[@]} ]]; then
   exit 1
 fi
 
+if [[ -n "${CONSENSUS_PEAKS}" && ! -f "${CONSENSUS_PEAKS}" ]]; then
+  echo "Consensus peaks file not found: ${CONSENSUS_PEAKS}" >&2
+  exit 1
+fi
+
 mkdir -p "${OUTPUT_DIR}" "${OUTPUT_DIR}/peaks"
-metadata_path="$(mktemp)"
-trap 'rm -f "${metadata_path}"' EXIT
 
-{
-  printf 'sample\tcondition\tbam\tpeaks\tpeak_type\n'
-  for idx in "${!A_BAMS[@]}"; do
-    bam="${A_BAMS[$idx]}"
-    sample="${COND_A}_rep$((idx + 1))"
-    peak="-"
-    peak_type="-"
-    if [[ ${#A_PEAKS[@]} -gt 0 ]]; then
-      peak="${A_PEAKS[$idx]}"
-      peak_type="auto"
-    fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "${sample}" "${COND_A}" "${bam}" "${peak}" "${peak_type}"
-  done
-  for idx in "${!B_BAMS[@]}"; do
-    bam="${B_BAMS[$idx]}"
-    sample="${COND_B}_rep$((idx + 1))"
-    peak="-"
-    peak_type="-"
-    if [[ ${#B_PEAKS[@]} -gt 0 ]]; then
-      peak="${B_PEAKS[$idx]}"
-      peak_type="auto"
-    fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "${sample}" "${COND_B}" "${bam}" "${peak}" "${peak_type}"
-  done
-} > "${metadata_path}"
+CMD=(
+  python "${PROJECT_ROOT}/chipdiff.py" runmode
+  --condition-a "${COND_A}"
+  --a-bams "${A_BAMS[@]}"
+  --condition-b "${COND_B}"
+  --b-bams "${B_BAMS[@]}"
+  --output-dir "${OUTPUT_DIR}"
+  --peak-dir "${OUTPUT_DIR}/peaks"
+  --min-overlap "${MIN_OVERLAP}"
+  --peak-type "${PEAK_TYPE}"
+  --summit-extension "${SUMMIT_EXTENSION}"
+  --macs2-genome "${MACS2_GENOME}"
+  --threads "${THREADS}"
+)
 
-echo "[example2] Metadata written to ${metadata_path}" >&2
+if [[ ${#A_PEAKS[@]} -gt 0 ]]; then
+  CMD+=(--a-peaks "${A_PEAKS[@]}")
+fi
+
+if [[ ${#B_PEAKS[@]} -gt 0 ]]; then
+  CMD+=(--b-peaks "${B_PEAKS[@]}")
+fi
+
+if [[ -n "${CONSENSUS_PEAKS}" ]]; then
+  CMD+=(--consensus-peaks "${CONSENSUS_PEAKS}")
+fi
 
 echo "[example2] Launching PeakForge..." >&2
-python "${PROJECT_ROOT}/chipdiff.py" \
-  --metadata "${metadata_path}" \
-  --output-dir "${OUTPUT_DIR}" \
-  --peak-dir "${OUTPUT_DIR}/peaks" \
-  --min-overlap "${MIN_OVERLAP}" \
-  --macs2-genome "${MACS2_GENOME}" \
-  --peak-type "${PEAK_TYPE}" \
-  --summit-extension "${SUMMIT_EXTENSION}" \
-  --threads "${THREADS}"
+"${CMD[@]}"
 
 echo "[example2] Results available in ${OUTPUT_DIR}" >&2
