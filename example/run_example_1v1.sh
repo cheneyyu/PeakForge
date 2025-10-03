@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${ROOT}/.." && pwd)"
 METADATA="${ROOT}/data/metadata_1v1.tsv"
 RESULTS_DIR="${RESULTS_DIR:-${ROOT}/results_1v1}"
-THREADS="${THREADS:-4}"
+THREADS="${THREADS:-16}"
 
 if [[ ! -f "${METADATA}" ]]; then
   echo "Metadata sheet not found: ${METADATA}" >&2
