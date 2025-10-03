@@ -1,0 +1,5 @@
+sample	condition	bam
+GM12878_rep1	GM12878	example/data/GM12878_rep1.bam
+GM12878_rep2	GM12878	example/data/GM12878_rep2.bam
+K562_rep1	K562	example/data/K562_rep1.bam
+K562_rep2	K562	example/data/K562_rep2.bam

@@ -106,6 +106,42 @@ Key files generated under `results/` include:
 
 ---
 
+## 🧬 ENCODE hg38 2v2 example dataset
+
+To help you get started quickly, the repository ships with an end-to-end example based on a widely used ENCODE H3K27ac dataset (hg38):
+
+- **GM12878 H3K27ac** – ENCSR000AKP
+- **K562 H3K27ac** – ENCSR000AKO
+
+The scripts in `example/` orchestrate downloading the public alignments, executing the PeakForge pipeline for the 2 vs 2 comparison, repeating all four possible 1 vs 1 contrasts, and benchmarking how closely the 1 vs 1 runs reproduce the 2 vs 2 signal.
+
+1. **Prepare the inputs**
+   ```bash
+   # Prints the curl commands by default (DRY_RUN=1)
+   bash example/download_encode.sh
+
+   # Actually download the BAMs (~15 GB total)
+   DRY_RUN=0 bash example/download_encode.sh
+   ```
+   Downloads are written to `example/data/` and a manifest (`encode_manifest.tsv`) is generated alongside the tab-delimited sample sheet (`metadata.tsv`).
+
+2. **Run the complete analysis**
+   ```bash
+   bash example/run_pipeline.sh
+   ```
+   This executes the 2v2 workflow plus four one-vs-one runs, storing results in `example/results/`.
+
+3. **Inspect reproducibility reports**
+   `example/analyze_replicates.py` (invoked automatically by `run_pipeline.sh`) aggregates:
+   - peak-level overlap precision/recall, F1, bp-wise Jaccard, and sign concordance;
+   - top-N recovery of the most significant 2v2 peaks;
+   - Spearman correlations of log2 fold-changes between the 2v2 run and each 1v1 replicate pairing;
+   - a union log2FC matrix (`global_log2fc_matrix.tsv`) for downstream clustering/QC.
+
+All scripts respect relative paths, so you can copy the `example/` directory into your own project and customize it as needed.
+
+---
+
 ## 🔧 Command reference
 
 Run `python chipdiff.py --help` to see all available options (peak calling parameters, threading, annotation, and enrichment settings).
