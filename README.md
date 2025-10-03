@@ -1,7 +1,7 @@
 # PeakForge
 
-**PeakForge** is a publishable-level Python pipeline for end-to-end CUT&Tag / ChIP-seq differential analysis.  
-It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads, runs differential analysis (DESeq2-like and MARS), and produces publication-quality figures.
+**PeakForge** is a publishable-level Python pipeline for end-to-end CUT&Tag / ChIP-seq differential analysis.
+It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads, runs differential analysis (PyDESeq2 or MARS), and produces publication-quality figures.
 
 ---
 
@@ -23,10 +23,9 @@ It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads,
 
 - **Differential analysis**
   - Automatically routes to the appropriate workflow based on replicate availability.
-  - **DESeq2-like** (with replicates):
-    - Median-ratio size factor normalization.
-    - Dispersion trend fitting + empirical Bayes shrinkage.
-    - Wald test with LFC shrinkage (ridge-EB).
+  - **DESeq2 (PyDESeq2)** (with replicates):
+    - Median-ratio normalization, dispersion estimation, and Wald testing handled by [PyDESeq2](https://github.com/owkin/PyDESeq2).
+    - Requires PyDESeq2 to be installed when replicate designs are detected.
   - **MARS (DEGseq, Likun Wang 2010)** (without replicates):
     - Supports 1 vs 1, or pooled multiple vs multiple samples.
     - MA-plot based exact binomial test.
@@ -37,7 +36,7 @@ It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads,
   - Run GO BP enrichment using **gseapy** (Enrichr).
 
 - **Output**
-  - Volcano plots (DESeq2-like and MARS).
+  - Volcano plots (PyDESeq2 and MARS).
   - MA plots.
   - Sample correlation heatmap.
   - Heatmap of top differential peaks.
@@ -50,7 +49,7 @@ It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads,
 Requirements:
 
 - Python ≥ 3.9
-- Libraries: `numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy`
+- Libraries: `numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy pydeseq2`
 - External tools:
   - [MACS2](https://github.com/macs3-project/MACS) (for peak calling)
   - [deepTools](https://deeptools.readthedocs.io/en/develop/) (for multiBamSummary)
@@ -59,7 +58,7 @@ Requirements:
 Install dependencies:
 
 ```bash
-pip install numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy
+pip install numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy pydeseq2
 conda install -c bioconda macs2 deeptools samtools
 ```
 
@@ -93,7 +92,7 @@ python chipdiff.py \
   --enrichr
 ```
 
-This run will call peaks (if needed), build consensus peaks across samples, compute counts, perform DESeq2-like differential analysis, optionally annotate peaks, and produce publication-ready plots.
+This run will call peaks (if needed), build consensus peaks across samples, compute counts, perform PyDESeq2-based differential analysis when replicates are present (falling back to MARS otherwise), optionally annotate peaks, and produce publication-ready plots.
 
 ### Output overview
 
@@ -137,10 +136,20 @@ The scripts in `example/` orchestrate downloading the public alignments, executi
    `example/analyze_replicates.py` (invoked automatically by `run_pipeline.sh`) aggregates:
    - peak-level overlap precision/recall, F1, bp-wise Jaccard, and sign concordance;
    - top-N recovery of the most significant 2v2 peaks;
-   - Spearman correlations of log2 fold-changes between the 2v2 run and each 1v1 replicate pairing;
-   - a union log2FC matrix (`global_log2fc_matrix.tsv`) for downstream clustering/QC.
+ - Spearman correlations of log2 fold-changes between the 2v2 run and each 1v1 replicate pairing;
+  - a union log2FC matrix (`global_log2fc_matrix.tsv`) for downstream clustering/QC.
 
 All scripts respect relative paths, so you can copy the `example/` directory into your own project and customize it as needed.
+
+### Example 1v1 quick start
+
+To exercise the no-replicate branch of the pipeline, run the bundled 1 vs 1 script:
+
+```bash
+bash example/run_example_1v1.sh
+```
+
+This uses the `metadata_1v1.tsv` sheet to compare `K562_rep1` against `HepG2_rep1` and produces MARS differential results under `example/results_1v1/`.
 
 ### Example 2: use existing BAM/peak files directly
 

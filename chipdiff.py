@@ -30,8 +30,8 @@ The pipeline performs the following steps:
 2. Construction of consensus peaks across samples.
 3. Counting read overlaps per consensus peak using deepTools
    ``multiBamSummary``.
-4. Differential analysis with either a DESeq2-like NB-GLM workflow
-   (replicated designs) or the MARS method (no replicates).
+4. Differential analysis with PyDESeq2 (replicated designs) or the
+   MARS method (no replicates).
 5. Optional annotation against a GTF file and Enrichr enrichment via
    gseapy.
 6. Plot generation (volcano, MA, correlation, heatmap) and metadata
@@ -52,7 +52,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -63,7 +63,13 @@ from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 from scipy import stats
 from statsmodels.nonparametric.smoothers_lowess import lowess
-import statsmodels.api as sm
+
+try:
+    from pydeseq2.dds import DeseqDataSet
+    from pydeseq2.ds import DeseqStats
+except ImportError:  # pragma: no cover - optional dependency
+    DeseqDataSet = None  # type: ignore[assignment]
+    DeseqStats = None  # type: ignore[assignment]
 
 try:
     import gseapy
@@ -338,88 +344,6 @@ def run_multibamsummary(consensus_bed: Path, samples: List[SampleEntry], output_
 # ---------------------------------------------------------------------------
 
 
-def median_ratio_normalization(counts: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray]:
-    """Perform median ratio normalization (DESeq2)."""
-
-    logging.info("Performing median-ratio normalization")
-    counts = counts.astype(float)
-    values = counts.to_numpy()
-    with np.errstate(divide="ignore"):
-        log_counts = np.where(values > 0, np.log(values), np.nan)
-    geometric_means = np.exp(np.nanmean(log_counts, axis=1))
-    geometric_means[~np.isfinite(geometric_means)] = 1.0
-    ratios = counts.divide(geometric_means, axis=0).replace([np.inf, -np.inf], np.nan)
-    size_factors = ratios.median(axis=0, skipna=True)
-    size_factors = size_factors.replace(0, np.nan).fillna(1.0).to_numpy()
-    normalized = counts.divide(size_factors, axis=1)
-    return normalized, size_factors
-
-
-def estimate_dispersions(normalized: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Estimate raw dispersions, fitted trend, and shrunk dispersions."""
-
-    means = normalized.mean(axis=1)
-    variances = normalized.var(axis=1, ddof=1)
-    raw_disp = (variances - means) / (means ** 2)
-    raw_disp = raw_disp.clip(lower=1e-8)
-
-    log_means = np.log(means + 1e-8)
-    log_disp = np.log(raw_disp)
-    # Fit LOWESS trend
-    fitted = lowess(log_disp, log_means, frac=0.3, return_sorted=False)
-    trend = np.exp(fitted)
-    prior_weight = 10.0
-    shrunk = (raw_disp + prior_weight * trend) / (1.0 + prior_weight)
-    return raw_disp.to_numpy(), trend, np.asarray(shrunk)
-
-
-def wald_test_deseq(counts: pd.DataFrame, conditions: pd.Series,
-                     size_factors: np.ndarray, dispersions: np.ndarray) -> pd.DataFrame:
-    samples = counts.columns.tolist()
-    design = pd.get_dummies(conditions.loc[samples], drop_first=True, dtype=float)
-    if design.shape[1] != 1:
-        raise ValueError("DESeq2-like workflow currently supports exactly two conditions with replicates")
-    cond_col = design.columns[0]
-    X = sm.add_constant(design.iloc[:, 0].to_numpy())
-
-    results = []
-    offsets = np.log(size_factors)
-    for idx, (peak, row) in enumerate(counts.iterrows()):
-        y = row.to_numpy()
-        disp = float(dispersions[idx])
-        try:
-            model = sm.GLM(y, X, family=sm.families.NegativeBinomial(alpha=disp), offset=offsets)
-            fit = model.fit(maxiter=200, disp=0)
-            beta = fit.params[1]
-            se = fit.bse[1]
-            wald = fit.tvalues[1]
-            pval = 2 * stats.norm.sf(abs(wald))
-        except Exception as exc:
-            logging.debug("GLM failed for %s (%s), falling back to Wald on means", peak, exc)
-            group_a = design.index[design.iloc[:, 0] == 0]
-            group_b = design.index[design.iloc[:, 0] == 1]
-            mean_a = row[group_a].mean() + 1e-6
-            mean_b = row[group_b].mean() + 1e-6
-            beta = math.log(mean_b / mean_a)
-            se = math.sqrt(1.0 / mean_a + 1.0 / mean_b)
-            wald = beta / se
-            pval = 2 * stats.norm.sf(abs(wald))
-        log2fc = beta / math.log(2)
-        se_log2 = se / math.log(2)
-        results.append((peak, log2fc, se_log2, pval))
-
-    res_df = pd.DataFrame(results, columns=["Peak", "log2FC", "SE_log2FC", "pvalue"])
-    res_df.set_index("Peak", inplace=True)
-    return res_df
-
-
-def shrink_log2fc(log2fc: pd.Series, se: pd.Series) -> pd.Series:
-    prior_var = np.nanmedian(log2fc**2)
-    prior_var = prior_var if np.isfinite(prior_var) and prior_var > 0 else 0.5
-    shrinkage = prior_var / (prior_var + se**2)
-    return log2fc * shrinkage
-
-
 def benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
     pvals = pvalues.fillna(1.0).to_numpy()
     n = len(pvals)
@@ -432,16 +356,42 @@ def benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
     return pd.Series(adjusted, index=pvalues.index)
 
 
-def deseqlike_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFrame:
-    normalized, size_factors = median_ratio_normalization(counts)
-    raw_disp, trend, shrunk_disp = estimate_dispersions(normalized)
-    res = wald_test_deseq(counts, conditions, size_factors, shrunk_disp)
-    res["baseMean"] = normalized.mean(axis=1)
-    res["lfcSE"] = res["SE_log2FC"]
-    res["padj"] = benjamini_hochberg(res["pvalue"]).fillna(1.0)
-    res["log2FC_shrunk"] = shrink_log2fc(res["log2FC"], res["SE_log2FC"])
-    res["method"] = "deseq_like"
-    return res
+def pydeseq2_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFrame:
+    if DeseqDataSet is None or DeseqStats is None:
+        raise ImportError("pydeseq2 is required for the DESeq2 workflow but is not installed")
+
+    logging.info("Running PyDESeq2 differential analysis")
+    samples = counts.columns.tolist()
+    cond = conditions.loc[samples]
+    if cond.nunique() != 2:
+        raise ValueError("PyDESeq2 differential analysis requires exactly two conditions")
+
+    condition_order = list(dict.fromkeys(cond.tolist()))
+    reference = condition_order[0]
+    contrast = condition_order[1]
+
+    metadata = pd.DataFrame({"condition": cond.astype("category")}, index=samples)
+    dds = DeseqDataSet(counts=counts.T.astype(int), metadata=metadata, design="~condition")
+    dds.deseq2()
+
+    stats = DeseqStats(dds, contrast=("condition", contrast, reference))
+    stats.summary()
+    res = stats.results_df.copy()
+    res.index.name = "Peak"
+
+    result = pd.DataFrame(index=res.index)
+    if "baseMean" in res.columns:
+        result["baseMean"] = res["baseMean"]
+    result["log2FC"] = res["log2FoldChange"]
+    if "lfcSE" in res.columns:
+        result["lfcSE"] = res["lfcSE"]
+    if "stat" in res.columns:
+        result["waldStat"] = res["stat"]
+    result["pvalue"] = res["pvalue"]
+    result["padj"] = res["padj"].fillna(1.0)
+    result["log2FC_shrunk"] = result["log2FC"]
+    result["method"] = "pydeseq2"
+    return result
 
 
 def mars_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFrame:
@@ -502,8 +452,8 @@ def call_differential_analysis(counts: pd.DataFrame, conditions: pd.Series) -> p
 
     replicates_per_condition = conditions.value_counts().min()
     if replicates_per_condition >= 2:
-        logging.info("Detected replicates per condition; using DESeq2-like analysis")
-        return deseqlike_differential(counts, conditions)
+        logging.info("Detected replicates per condition; using DESeq2 analysis via PyDESeq2")
+        return pydeseq2_differential(counts, conditions)
 
     logging.info("No replicates detected; using MARS analysis")
     return mars_differential(counts, conditions)
