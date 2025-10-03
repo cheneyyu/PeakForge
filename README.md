@@ -1,7 +1,9 @@
 # PeakForge
 
-**PeakForge** is a publishable-level Python pipeline for end-to-end CUT&Tag / ChIP-seq differential analysis.
-It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads, runs differential analysis (PyDESeq2 or MARS), and produces publication-quality figures.
+**PeakForge** is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CUT&Tag, and ChIP-seq differential analysis.
+It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads, and runs differential analysis (PyDESeq2 or MARS) whether or not biological replicates are available.
+Two ATAC contrasts searching for differential motifs is one of the core scenarios the pipeline targets, ensuring motif/regulon shifts are detectable even when each condition is represented by a single rich sample.
+Beyond standard replicate-aware testing, the pipeline supports single-sample vs single-sample contrasts for cases where cohesive motif/regulon signals make no-replicate comparisons informative.
 
 ---
 
@@ -69,7 +71,7 @@ conda install -c bioconda macs2 deeptools samtools
 
 1. Prepare a sample sheet (`samples.tsv`) describing your BAM files and optional peak calls.
 2. Run the pipeline with `./peakforge tsvmode samples.tsv --output-dir results` (or `python chipdiff.py tsvmode samples.tsv --output-dir results`).
-3. Inspect the figures and result tables written to the `results/` directory.
+3. Inspect the summary plots and result tables written to the `results/` directory.
 
 ### Sample sheet format
 
@@ -92,7 +94,7 @@ The sheet can be tab- or comma-delimited and must include the columns `sample`, 
   --enrichr
 ```
 
-This run will call peaks (if needed), build consensus peaks across samples, compute counts, perform PyDESeq2-based differential analysis when replicates are present (falling back to MARS otherwise), optionally annotate peaks, and produce publication-ready plots.
+This run will call peaks (if needed), build consensus peaks across samples, compute counts, perform PyDESeq2-based differential analysis when replicates are present (falling back to MARS otherwise), optionally annotate peaks, and generate standard comparison plots.
 
 `multiBamSummary` is invoked with `--numberOfProcessors 16` by default; override with `--threads` if you need a different level of parallelism.
 
@@ -213,6 +215,10 @@ output directory. Pass that file to either `tsvmode` or `runmode` with
 contrasts (for example, when you want to compare a single replicate against the
 2 vs 2 consensus). Doing so avoids re-running MACS2 and keeps fold-change
 estimates directly comparable across analyses.
+
+## 📝 TODO
+
+- Add a gallery of publication-level figures that showcases typical PeakForge outputs.
 
 ---
 
