@@ -44,6 +44,8 @@ Beyond standard replicate-aware testing, the pipeline supports single-sample vs 
   - Sample correlation heatmap.
   - Heatmap of top differential peaks.
   - Results tables (`.tsv`) and metadata (`.json`).
+  - Standalone peak shape profiling via `peak_shape.py` for comparing two bigWig
+    tracks over a BED of regions (with delta metrics and plots).
 
 ---
 
@@ -107,6 +109,40 @@ Key files generated under `results/` include:
 - `plots/` – volcano, MA, correlation, and heatmap figures.
 - `plots/differential_summary.png` – clusterProfiler-style overview of significant peaks.
 - `metadata.json` – run configuration and provenance metadata.
+
+---
+
+## 🔍 Peak shape analysis module
+
+The repository also ships a standalone shape-profiling utility for comparing
+two signal tracks over a shared set of genomic regions:
+
+```bash
+python peak_shape.py \
+  --bigwig-a sampleA.bw \
+  --bigwig-b sampleB.bw \
+  --bed peaks.bed \
+  --core 500 \
+  --flank 1000 3000 \
+  --out results/shape
+```
+
+For each interval the script normalises the signal, computes FWHM, core:flank
+ratios, centroid shifts, and skewness, then records the per-sample values plus
+their deltas in `peak_shape.tsv`.  Summary histograms, scatter plots, and a
+heatmap of the top outliers are written to `results/shape/plots/`.
+
+To try the module without downloading real datasets, use the synthetic example
+under `example/peak_shape/`:
+
+```bash
+cd example/peak_shape
+bash run_peak_shape.sh
+```
+
+The helper script builds toy bigWig tracks on demand so you can inspect the
+workflow end-to-end.  Replace the generated files with your own bigWigs and BED
+to run the same analysis on real data.
 
 ---
 
