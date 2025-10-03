@@ -21,6 +21,8 @@ Optional arguments:
                              narrowPeak, or broadPeak). When provided, MACS2
                              is skipped for those samples.
   --b-peaks FILE [FILE ...]  Peak files aligned with --b-bams.
+  --consensus-peaks FILE     Reuse an existing consensus BED instead of
+                             rebuilding peaks.
   --output-dir DIR           Output directory (default: example/results/example2)
   --threads N                Threads for multiBamSummary (default: 16)
   --min-overlap N            Minimum samples required for consensus peaks (default: 2)
@@ -65,6 +67,7 @@ A_BAMS=()
 B_BAMS=()
 A_PEAKS=()
 B_PEAKS=()
+CONSENSUS_PEAKS=""
 
 if [[ $# -eq 0 ]]; then
   show_help
@@ -108,6 +111,10 @@ while [[ $# -gt 0 ]]; do
         B_PEAKS+=("$1")
         shift
       done
+      ;;
+    --consensus-peaks)
+      CONSENSUS_PEAKS="$2"
+      shift 2
       ;;
     --output-dir)
       OUTPUT_DIR="$2"
@@ -170,6 +177,11 @@ if [[ ${#B_PEAKS[@]} -gt 0 && ${#B_PEAKS[@]} -ne ${#B_BAMS[@]} ]]; then
   exit 1
 fi
 
+if [[ -n "${CONSENSUS_PEAKS}" && ! -f "${CONSENSUS_PEAKS}" ]]; then
+  echo "Consensus peaks file not found: ${CONSENSUS_PEAKS}" >&2
+  exit 1
+fi
+
 mkdir -p "${OUTPUT_DIR}" "${OUTPUT_DIR}/peaks"
 
 CMD=(
@@ -193,6 +205,10 @@ fi
 
 if [[ ${#B_PEAKS[@]} -gt 0 ]]; then
   CMD+=(--b-peaks "${B_PEAKS[@]}")
+fi
+
+if [[ -n "${CONSENSUS_PEAKS}" ]]; then
+  CMD+=(--consensus-peaks "${CONSENSUS_PEAKS}")
 fi
 
 echo "[example2] Launching PeakForge..." >&2

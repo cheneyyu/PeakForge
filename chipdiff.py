@@ -366,6 +366,55 @@ def build_consensus(peak_ranges: Dict[str, pr.PyRanges], *, min_overlap: int) ->
     return pr.PyRanges(consensus_df[["Chromosome", "Start", "End", "Name", "Support"]])
 
 
+def load_consensus_bed(path: Path) -> pr.PyRanges:
+    """Load an existing consensus BED file into a ``PyRanges`` object."""
+
+    if not path.exists():
+        raise FileNotFoundError(f"Consensus BED file not found: {path}")
+
+    df = pd.read_csv(path, sep="\t", comment="#", header=None)
+    if df.shape[1] < 3:
+        raise ValueError(
+            f"Consensus BED {path} must have at least three columns (chrom, start, end)"
+        )
+
+    base = df.iloc[:, :3].copy()
+    base.columns = ["Chromosome", "Start", "End"]
+    base["Start"] = pd.to_numeric(base["Start"], errors="raise")
+    base["End"] = pd.to_numeric(base["End"], errors="raise")
+
+    names: List[str] = []
+    provided_names = df.iloc[:, 3] if df.shape[1] >= 4 else None
+    seen: Set[str] = set()
+    for idx in range(len(base)):
+        value: Optional[str] = None
+        if provided_names is not None:
+            raw = provided_names.iloc[idx]
+            if pd.notna(raw):
+                raw_str = str(raw).strip()
+                if raw_str:
+                    value = raw_str
+        if not value:
+            value = f"consensus_{idx + 1}"
+        # Guarantee uniqueness in case the BED supplies duplicates
+        candidate = value
+        suffix = 1
+        while candidate in seen:
+            suffix += 1
+            candidate = f"{value}_{suffix}"
+        seen.add(candidate)
+        names.append(candidate)
+
+    base["Name"] = names
+
+    support = pd.Series([pd.NA] * len(base))
+    if df.shape[1] >= 5:
+        support = pd.to_numeric(df.iloc[:, 4], errors="coerce")
+    base["Support"] = support
+
+    return pr.PyRanges(base[["Chromosome", "Start", "End", "Name", "Support"]])
+
+
 # ---------------------------------------------------------------------------
 # Counting with deepTools
 # ---------------------------------------------------------------------------
@@ -852,8 +901,11 @@ def run_pipeline(
 
     conditions = pd.Series({s.sample: s.condition for s in samples})
 
+    consensus_arg = getattr(args, "consensus_peaks", None)
+    consensus_path = Path(consensus_arg) if consensus_arg else None
+
     required_cmds = ["multiBamSummary", "samtools"]
-    needs_peak_calling = any(sample.peaks is None for sample in samples)
+    needs_peak_calling = consensus_path is None and any(sample.peaks is None for sample in samples)
     if needs_peak_calling:
         required_cmds.append("macs2")
     ensure_commands(required_cmds)
@@ -864,23 +916,43 @@ def run_pipeline(
 
     library_sizes = compute_library_sizes(samples, samtools_path)
 
-    macs2_params = {
-        "genome": args.macs2_genome,
-        "qvalue": args.macs2_qvalue,
-        "extra": args.macs2_extra,
-    }
-    peak_ranges = load_all_peaks(
-        samples,
-        summit_extension=args.summit_extension,
-        default_peak_type=args.peak_type,
-        macs2_params=macs2_params,
-        peak_output_dir=Path(args.peak_dir),
-    )
-
-    consensus = build_consensus(peak_ranges, min_overlap=args.min_overlap)
     results_dir = ensure_directory(Path(args.output_dir))
+
+    consensus: pr.PyRanges
     consensus_bed = results_dir / "consensus_peaks.bed"
-    consensus.df[["Chromosome", "Start", "End", "Name"]].to_csv(consensus_bed, sep="\t", header=False, index=False)
+    consensus_metadata: Dict[str, Optional[str]] = {
+        "source": "generated" if consensus_path is None else "provided",
+        "input": str(consensus_path) if consensus_path else None,
+        "path": str(consensus_bed),
+    }
+
+    if consensus_path is None:
+        macs2_params = {
+            "genome": args.macs2_genome,
+            "qvalue": args.macs2_qvalue,
+            "extra": args.macs2_extra,
+        }
+        peak_ranges = load_all_peaks(
+            samples,
+            summit_extension=args.summit_extension,
+            default_peak_type=args.peak_type,
+            macs2_params=macs2_params,
+            peak_output_dir=Path(args.peak_dir),
+        )
+
+        consensus = build_consensus(peak_ranges, min_overlap=args.min_overlap)
+        consensus.df[["Chromosome", "Start", "End", "Name"]].to_csv(
+            consensus_bed, sep="\t", header=False, index=False
+        )
+    else:
+        logging.info("Using provided consensus peaks: %s", consensus_path)
+        consensus = load_consensus_bed(consensus_path)
+        ensure_directory(consensus_bed.parent)
+        if consensus_path.resolve() != consensus_bed.resolve():
+            shutil.copyfile(consensus_path, consensus_bed)
+
+    if len(consensus) == 0:
+        raise ValueError("Consensus peak set is empty; cannot proceed with counting")
 
     counts_tsv = run_multibamsummary(consensus_bed, samples, results_dir / "counts", threads=args.threads)
     raw_counts = pd.read_csv(counts_tsv, sep="\t")
@@ -1003,6 +1075,7 @@ def run_pipeline(
         "annotation": str(annotation_path) if annotation_path else None,
         "enrichr": str(enrichr_path) if enrichr_path else None,
         "library_sizes": {name: float(value) for name, value in library_sizes.to_dict().items()},
+        "consensus": consensus_metadata,
     }
     save_metadata(metadata, results_dir / "metadata.json")
 
@@ -1068,6 +1141,10 @@ def build_runmode_samples(args: argparse.Namespace) -> List[SampleEntry]:
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", default="results", help="Output directory")
     parser.add_argument("--peak-dir", default="peaks", help="Directory for peak calls")
+    parser.add_argument(
+        "--consensus-peaks",
+        help="Use an existing consensus BED instead of building peaks from samples",
+    )
     parser.add_argument(
         "--peak-type",
         default="narrow",
