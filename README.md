@@ -108,10 +108,10 @@ Key files generated under `results/` include:
 
 ## 🧬 ENCODE hg38 2v2 example dataset
 
-To help you get started quickly, the repository ships with an end-to-end example based on a widely used ENCODE H3K27ac dataset (hg38):
+To help you get started quickly, the repository ships with an end-to-end example based on a matched ENCODE MYC ChIP-seq dataset (hg38):
 
-- **GM12878 H3K27ac** – ENCSR000AKP
-- **K562 H3K27ac** – ENCSR000AKO
+- **K562 MYC** – replicates [`ENCFF975ETI.bam`, `ENCFF380OWL.bam`]
+- **HepG2 MYC** – replicates [`ENCFF315AUW.bam`, `ENCFF987GJQ.bam`]
 
 The scripts in `example/` orchestrate downloading the public alignments, executing the PeakForge pipeline for the 2 vs 2 comparison, repeating all four possible 1 vs 1 contrasts, and benchmarking how closely the 1 vs 1 runs reproduce the 2 vs 2 signal.
 

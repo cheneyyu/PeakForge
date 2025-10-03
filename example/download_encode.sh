@@ -9,132 +9,80 @@ mkdir -p "${DATA_DIR}"
 : "${DRY_RUN:=1}"
 
 cat <<'BANNER'
-This helper fetches a matched 2 vs 2 ENCODE ChIP-seq dataset (hg38):
-  - GM12878 H3K27ac (ENCSR000AKP)
-  - K562 H3K27ac (ENCSR000AKO)
+This helper fetches a matched 2 vs 2 ENCODE MYC ChIP-seq dataset (hg38):
+  - K562 MYC (ENCFF975ETI, ENCFF380OWL)
+  - HepG2 MYC (ENCFF315AUW, ENCFF987GJQ)
 
 By default the script runs in DRY-RUN mode and only prints the curl
 commands.  Set DRY_RUN=0 to download the files.
 BANNER
 
 python3 - <<'PY' "${DATA_DIR}" "${MANIFEST}" "${DRY_RUN}"
-import json
+import subprocess
 import sys
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
-BASE = "https://www.encodeproject.org"
-HEADERS = {
-    "User-Agent": "PeakForge-fetcher/1.0 (+https://github.com/)",
-    "Accept": "application/json",
-}
+FILES = [
+    {
+        "sample": "K562_rep1",
+        "condition": "K562",
+        "accession": "ENCFF975ETI",
+        "url": "https://www.encodeproject.org/files/ENCFF975ETI/@@download/ENCFF975ETI.bam",
+    },
+    {
+        "sample": "K562_rep2",
+        "condition": "K562",
+        "accession": "ENCFF380OWL",
+        "url": "https://www.encodeproject.org/files/ENCFF380OWL/@@download/ENCFF380OWL.bam",
+    },
+    {
+        "sample": "HepG2_rep1",
+        "condition": "HepG2",
+        "accession": "ENCFF315AUW",
+        "url": "https://www.encodeproject.org/files/ENCFF315AUW/@@download/ENCFF315AUW.bam",
+    },
+    {
+        "sample": "HepG2_rep2",
+        "condition": "HepG2",
+        "accession": "ENCFF987GJQ",
+        "url": "https://www.encodeproject.org/files/ENCFF987GJQ/@@download/ENCFF987GJQ.bam",
+    },
+]
 
-def fetch_json(url: str) -> dict:
-    req = urllib.request.Request(url, headers=HEADERS)
-    # Respect proxies from the environment
-    opener = urllib.request.build_opener()
-    with opener.open(req) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"Failed to fetch {url} (HTTP {resp.status})")
-        return json.load(resp)
-
-def iter_files(experiment: str) -> list[dict]:
-    params = {
-        "type": "File",
-        "dataset": experiment,
-        "output_type": "alignments",
-        "assembly": "GRCh38",
-        "file_format": "bam",
-        "status": "released",
-        "limit": "all",
-        "format": "json",
-        "field": [
-            "accession",
-            "href",
-            "md5sum",
-            "file_format",
-            "file_type",
-            "replicate.title",
-            "replicate.biological_replicate_number",
-            "replicate.technical_replicate_number",
-            "preferred_default",
-        ],
-    }
-    query = urllib.parse.urlencode(params, doseq=True)
-    url = f"{BASE}/search/?{query}"
-    data = fetch_json(url)
-    return data["@graph"]
-
-def select_replicates(records: list[dict], count: int = 2) -> list[dict]:
-    sorted_records = sorted(
-        records,
-        key=lambda rec: (
-            rec.get("replicate", {}).get("biological_replicate_number", 99),
-            rec.get("replicate", {}).get("technical_replicate_number", 99),
-            not rec.get("preferred_default", False),
-            rec.get("accession"),
-        ),
-    )
-    selected = []
-    seen = set()
-    for rec in sorted_records:
-        rep = rec.get("replicate") or {}
-        bio = rep.get("biological_replicate_number")
-        if bio is None or bio in seen:
-            continue
-        selected.append(rec)
-        seen.add(bio)
-        if len(selected) == count:
-            break
-    if len(selected) < count:
-        raise RuntimeError(f"Expected >= {count} replicates but found {len(selected)}")
-    return selected
 
 def main(data_dir: Path, manifest_path: Path, dry_run: bool) -> None:
-    experiments = [
-        ("GM12878", "ENCSR000AKP"),
-        ("K562", "ENCSR000AKO"),
-    ]
+    data_dir.mkdir(parents=True, exist_ok=True)
     rows = ["sample\tcondition\taccession\tdestination\tmd5sum\turl"]
-    for condition, experiment in experiments:
-        files = select_replicates(iter_files(experiment))
-        for rec in files:
-            rep = rec.get("replicate") or {}
-            bio = rep.get("biological_replicate_number")
-            accession = rec["accession"]
-            ext = rec.get("file_format", "bam")
-            dest = data_dir / f"{condition}_rep{bio}.{ext}"
-            download_url = f"{BASE}/files/{accession}/@@download/{accession}.{ext}"
-            rows.append(
-                "\t".join(
-                    [
-                        f"{condition}_rep{bio}",
-                        condition,
-                        accession,
-                        str(dest),
-                        rec.get("md5sum", ""),
-                        download_url,
-                    ]
-                )
+    for entry in FILES:
+        dest = data_dir / f"{entry['sample']}.bam"
+        rows.append(
+            "\t".join(
+                [
+                    entry["sample"],
+                    entry["condition"],
+                    entry["accession"],
+                    str(dest),
+                    "",
+                    entry["url"],
+                ]
             )
-            cmd = [
-                "curl",
-                "-L",
-                "-H",
-                "Accept: application/json",
-                "-o",
-                str(dest),
-                download_url,
-            ]
-            print("[command]", " ".join(cmd))
-            if not dry_run:
-                data_dir.mkdir(parents=True, exist_ok=True)
-                import subprocess
+        )
+        cmd = [
+            "curl",
+            "-L",
+            "-H",
+            "Accept: application/json",
+            "-o",
+            str(dest),
+            entry["url"],
+        ]
+        print("[command]", " ".join(cmd))
+        if not dry_run:
+            subprocess.run(cmd, check=True)
 
-                subprocess.run(cmd, check=True)
     manifest_path.write_text("\n".join(rows) + "\n")
     print(f"Manifest written to {manifest_path}")
+
 
 if __name__ == "__main__":
     data_dir = Path(sys.argv[1])
