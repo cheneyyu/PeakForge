@@ -43,7 +43,6 @@ pyranges, gseapy, MACS2, deepTools.
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import logging
 import math
@@ -371,7 +370,7 @@ def estimate_dispersions(normalized: pd.DataFrame) -> Tuple[np.ndarray, np.ndarr
     trend = np.exp(fitted)
     prior_weight = 10.0
     shrunk = (raw_disp + prior_weight * trend) / (1.0 + prior_weight)
-    return raw_disp.to_numpy(), trend, shrunk
+    return raw_disp.to_numpy(), trend, np.asarray(shrunk)
 
 
 def wald_test_deseq(counts: pd.DataFrame, conditions: pd.Series,
@@ -888,10 +887,22 @@ def run_pipeline(args: argparse.Namespace) -> None:
             else:
                 enrichr_path = run_enrichr(top_genes, results_dir / "enrichr", description="chipdiff")
 
+    sample_metadata = []
+    for sample in samples:
+        sample_metadata.append(
+            {
+                "sample": sample.sample,
+                "condition": sample.condition,
+                "bam": str(sample.bam),
+                "peaks": str(sample.peaks) if sample.peaks is not None else None,
+                "peak_type": sample.peak_type,
+            }
+        )
+
     metadata = {
         "timestamp": datetime.utcnow().isoformat(),
         "args": vars(args),
-        "samples": [dataclasses.asdict(s) for s in samples],
+        "samples": sample_metadata,
         "counts_matrix": str(counts_tsv),
         "differential_results": str(diff_path),
         "plots": {key: str(path) for key, path in plot_paths.items()},
