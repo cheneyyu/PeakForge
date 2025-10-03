@@ -377,7 +377,7 @@ def estimate_dispersions(normalized: pd.DataFrame) -> Tuple[np.ndarray, np.ndarr
 def wald_test_deseq(counts: pd.DataFrame, conditions: pd.Series,
                      size_factors: np.ndarray, dispersions: np.ndarray) -> pd.DataFrame:
     samples = counts.columns.tolist()
-    design = pd.get_dummies(conditions.loc[samples], drop_first=True)
+    design = pd.get_dummies(conditions.loc[samples], drop_first=True, dtype=float)
     if design.shape[1] != 1:
         raise ValueError("DESeq2-like workflow currently supports exactly two conditions with replicates")
     cond_col = design.columns[0]

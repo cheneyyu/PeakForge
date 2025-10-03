@@ -142,6 +142,27 @@ The scripts in `example/` orchestrate downloading the public alignments, executi
 
 All scripts respect relative paths, so you can copy the `example/` directory into your own project and customize it as needed.
 
+### Example 2: use existing BAM/peak files directly
+
+If you already have the BAMs (and optionally MACS2 peak calls) on disk, the
+helper script `example/run_example2.sh` lets you drive the full pipeline
+without re-running the download/index step:
+
+```bash
+bash example/run_example2.sh \
+  --condition-a K562 \
+  --a-bams example/data/K562_rep1.bam example/data/K562_rep2.bam \
+  --a-peaks example/results/2v2/peaks/K562_rep1_summits.bed example/results/2v2/peaks/K562_rep2_summits.bed \
+  --condition-b HepG2 \
+  --b-bams example/data/HepG2_rep1.bam example/data/HepG2_rep2.bam \
+  --b-peaks example/results/2v2/peaks/HepG2_rep1_summits.bed example/results/2v2/peaks/HepG2_rep2_summits.bed
+```
+
+The script generates a temporary metadata sheet that points to the supplied
+paths and then invokes `chipdiff.py` with sensible defaults. Provide peak files
+to skip MACS2 entirely; omit them if you want the pipeline to call peaks from
+your BAMs on the fly.
+
 ---
 
 ## 🔧 Command reference
