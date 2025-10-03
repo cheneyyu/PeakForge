@@ -345,13 +345,18 @@ def run_multibamsummary(consensus_bed: Path, samples: List[SampleEntry], output_
 
 
 def benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
-    pvals = pvalues.fillna(1.0).to_numpy()
+    pvals = pvalues.fillna(1.0).to_numpy(dtype=float, copy=True)
     n = len(pvals)
+    if n == 0:
+        return pd.Series(index=pvalues.index, dtype=float)
+
     order = np.argsort(pvals)
-    ranks = np.empty(n, dtype=float)
-    ranks[order] = np.arange(1, n + 1)
-    adjusted = pvals * n / ranks
-    adjusted = np.minimum.accumulate(adjusted[::-1])[::-1]
+    ranks = np.arange(1, n + 1, dtype=float)
+    adjusted_sorted = pvals[order] * n / ranks
+    adjusted_sorted = np.minimum.accumulate(adjusted_sorted[::-1])[::-1]
+
+    adjusted = np.empty_like(adjusted_sorted)
+    adjusted[order] = adjusted_sorted
     adjusted = np.clip(adjusted, 0, 1)
     return pd.Series(adjusted, index=pvalues.index)
 
@@ -882,7 +887,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--macs2-genome", default="hs", help="MACS2 genome size (e.g. hs, mm, 2.7e9)")
     parser.add_argument("--macs2-qvalue", type=float, default=0.01, help="MACS2 q-value cutoff")
     parser.add_argument("--macs2-extra", nargs=argparse.REMAINDER, default=[], help="Additional arguments for MACS2")
-    parser.add_argument("--threads", type=int, default=4, help="Threads for multiBamSummary")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=16,
+        help="Threads for multiBamSummary (--numberOfProcessors)",
+    )
     parser.add_argument("--gtf", help="Optional GTF file for annotation")
     parser.add_argument("--enrichr", action="store_true", help="Run Enrichr GO Biological Process analysis")
     parser.add_argument("--enrichr-top", type=int, default=200, help="Number of top peaks for enrichment")

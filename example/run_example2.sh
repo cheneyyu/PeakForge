@@ -22,14 +22,24 @@ Optional arguments:
                              is skipped for those samples.
   --b-peaks FILE [FILE ...]  Peak files aligned with --b-bams.
   --output-dir DIR           Output directory (default: example/results/example2)
-  --threads N                Threads for multiBamSummary (default: 4)
+  --threads N                Threads for multiBamSummary (default: 16)
   --min-overlap N            Minimum samples required for consensus peaks (default: 2)
   --peak-type TYPE           Default peak type when calling MACS2 (default: narrow)
   --summit-extension BP      Summit extension/half-window size (default: 250)
   --macs2-genome G           Genome size string passed to MACS2 (default: hs)
   -h, --help                 Show this help message and exit
 
-Example:
+Examples:
+  # 1 vs 1 with provided summits
+  bash run_example2.sh \
+    --condition-a K562 \
+    --a-bams data/K562_rep1.bam \
+    --a-peaks results/2v2/peaks/K562_rep1_summits.bed \
+    --condition-b HepG2 \
+    --b-bams data/HepG2_rep1.bam \
+    --b-peaks results/2v2/peaks/HepG2_rep1_summits.bed
+
+  # 2 vs 2 using replicate peaks
   bash run_example2.sh \
     --condition-a K562 \
     --a-bams data/K562_rep1.bam data/K562_rep2.bam \
@@ -46,7 +56,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 COND_A=""
 COND_B=""
 OUTPUT_DIR="${SCRIPT_DIR}/results/example2"
-THREADS=4
+THREADS=16
 MIN_OVERLAP=2
 PEAK_TYPE="narrow"
 SUMMIT_EXTENSION=250

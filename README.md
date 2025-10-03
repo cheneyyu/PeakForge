@@ -94,6 +94,8 @@ python chipdiff.py \
 
 This run will call peaks (if needed), build consensus peaks across samples, compute counts, perform PyDESeq2-based differential analysis when replicates are present (falling back to MARS otherwise), optionally annotate peaks, and produce publication-ready plots.
 
+`multiBamSummary` is invoked with `--numberOfProcessors 16` by default; override with `--threads` if you need a different level of parallelism.
+
 ### Output overview
 
 Key files generated under `results/` include:
@@ -141,7 +143,7 @@ The scripts in `example/` orchestrate downloading the public alignments, executi
 
 All scripts respect relative paths, so you can copy the `example/` directory into your own project and customize it as needed.
 
-### Example 1v1 quick start
+### Example 1: 1v1 quick start
 
 To exercise the no-replicate branch of the pipeline, run the bundled 1 vs 1 script:
 
@@ -151,11 +153,47 @@ bash example/run_example_1v1.sh
 
 This uses the `metadata_1v1.tsv` sheet to compare `K562_rep1` against `HepG2_rep1` and produces MARS differential results under `example/results_1v1/`.
 
-### Example 2: use existing BAM/peak files directly
+### Example 2: 1v1 with existing BAM/peak files
 
-If you already have the BAMs (and optionally MACS2 peak calls) on disk, the
-helper script `example/run_example2.sh` lets you drive the full pipeline
-without re-running the download/index step:
+If you already have a pair of BAMs (and optionally MACS2 peak calls) on disk,
+the helper script `example/run_example2.sh` lets you drive the 1 vs 1 branch
+directly without re-running the download/index step:
+
+```bash
+bash example/run_example2.sh \
+  --condition-a K562 \
+  --a-bams example/data/K562_rep1.bam \
+  --a-peaks example/results/2v2/peaks/K562_rep1_summits.bed \
+  --condition-b HepG2 \
+  --b-bams example/data/HepG2_rep1.bam \
+  --b-peaks example/results/2v2/peaks/HepG2_rep1_summits.bed
+```
+
+The script generates a temporary metadata sheet that points to the supplied
+paths and then invokes `chipdiff.py` with sensible defaults (including
+`--threads 16`, which maps to `multiBamSummary --numberOfProcessors`). Provide
+peak files to skip MACS2 entirely; omit them if you want the pipeline to call
+peaks from your BAMs on the fly.
+
+### Example 3: 2v2 quick start
+
+Once the ENCODE dataset is downloaded, you can launch the bundled 2 vs 2
+workflow—plus all pairwise 1 vs 1 comparisons—via:
+
+```bash
+bash example/run_pipeline.sh
+```
+
+This script reads `example/data/metadata.tsv`, runs the full PeakForge pipeline
+with a default of 16 `multiBamSummary` threads, and stores results under
+`example/results/`. Reproducibility reports are written to
+`example/results/reports/`.
+
+### Example 4: 2v2 with existing BAM/peak files
+
+When your own paired conditions (with replicates) are already aligned, reuse
+`example/run_example2.sh` to spin up the full differential analysis without
+taking the download shortcut:
 
 ```bash
 bash example/run_example2.sh \
@@ -167,10 +205,9 @@ bash example/run_example2.sh \
   --b-peaks example/results/2v2/peaks/HepG2_rep1_summits.bed example/results/2v2/peaks/HepG2_rep2_summits.bed
 ```
 
-The script generates a temporary metadata sheet that points to the supplied
-paths and then invokes `chipdiff.py` with sensible defaults. Provide peak files
-to skip MACS2 entirely; omit them if you want the pipeline to call peaks from
-your BAMs on the fly.
+Supplying peak calls for each replicate skips MACS2 entirely; otherwise the
+script will trigger peak calling for the provided BAMs before consensus/DE
+analysis.
 
 ---
 
