@@ -795,6 +795,18 @@ def run_pipeline(args: argparse.Namespace) -> None:
     counts_tsv = run_multibamsummary(consensus_bed, samples, results_dir / "counts", threads=args.threads)
     raw_counts = pd.read_csv(counts_tsv, sep="\t")
 
+    # deepTools 3.5 switched to quoting header labels in TSV output.  Clean up
+    # the column names so downstream logic can match against the expected
+    # ``chrom`` / ``start`` / ``end`` headers and sample BAM names regardless
+    # of whether they were quoted or prefixed with ``#``.
+    def _normalise_header(value: str) -> str:
+        cleaned = value.strip()
+        cleaned = cleaned.lstrip("#")
+        cleaned = cleaned.strip("'\"")
+        return cleaned or value
+
+    raw_counts.rename(columns={col: _normalise_header(col) for col in raw_counts.columns}, inplace=True)
+
     # deepTools historically used ``#chr`` for the chromosome column but some
     # versions emit ``#chrom`` or even plain ``chrom``.  Normalise these headers
     # so downstream joins can rely on a canonical ``Chromosome`` column.
