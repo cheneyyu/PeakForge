@@ -1,7 +1,8 @@
 # PeakForge
 
-**PeakForge** is a Python-native, DiffBind-style toolkit for end-to-end CUT&Tag / ChIP-seq differential analysis.
+**PeakForge** is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CUT&Tag, and ChIP-seq differential analysis.
 It takes BAM or MACS2 peak files as input, builds consensus peaks, counts reads, and runs differential analysis (PyDESeq2 or MARS) whether or not biological replicates are available.
+Two ATAC contrasts searching for differential motifs is one of the core scenarios the pipeline targets, ensuring motif/regulon shifts are detectable even when each condition is represented by a single rich sample.
 Beyond standard replicate-aware testing, the pipeline supports single-sample vs single-sample contrasts for cases where cohesive motif/regulon signals make no-replicate comparisons informative.
 
 ---
