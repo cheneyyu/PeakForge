@@ -124,7 +124,7 @@ The scripts in `example/` orchestrate downloading the public alignments and exec
    # Prints the curl commands by default (DRY_RUN=1)
    bash example/download_encode.sh
 
-   # Actually download the BAMs (~15 GB total)
+   # Actually download the BAMs (~1.5 GB total)
    DRY_RUN=0 bash example/download_encode.sh
    ```
    Downloads are written to `example/data/` and a manifest (`encode_manifest.tsv`) is generated alongside the tab-delimited sample sheet (`metadata.tsv`).
