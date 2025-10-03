@@ -794,7 +794,34 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
     counts_tsv = run_multibamsummary(consensus_bed, samples, results_dir / "counts", threads=args.threads)
     raw_counts = pd.read_csv(counts_tsv, sep="\t")
-    raw_counts.rename(columns={"#chrom": "Chromosome"}, inplace=True)
+
+    # deepTools historically used ``#chr`` for the chromosome column but some
+    # versions emit ``#chrom`` or even plain ``chrom``.  Normalise these headers
+    # so downstream joins can rely on a canonical ``Chromosome`` column.
+    chromosome_aliases = {
+        "#chrom",
+        "#chr",
+        "chrom",
+        "chr",
+        "#Chromosome",
+        "Chromosome",
+    }
+    matched_chrom = next((col for col in raw_counts.columns if col in chromosome_aliases), None)
+    if matched_chrom is None:
+        matched_chrom = next(
+            (
+                col
+                for col in raw_counts.columns
+                if col.lower().lstrip("#") in {"chrom", "chr", "chromosome"}
+            ),
+            None,
+        )
+    if matched_chrom is None:
+        raise ValueError(
+            "Counts matrix is missing a chromosome column (expected one of #chr, #chrom, chrom)."
+        )
+    raw_counts.rename(columns={matched_chrom: "Chromosome"}, inplace=True)
+
     consensus_df = consensus.df.rename(columns={"Start": "start", "End": "end"})
     merged = raw_counts.merge(consensus_df[["Chromosome", "start", "end", "Name"]],
                               on=["Chromosome", "start", "end"], how="left")
