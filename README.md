@@ -44,8 +44,9 @@ Beyond standard replicate-aware testing, the pipeline supports single-sample vs 
   - Sample correlation heatmap.
   - Heatmap of top differential peaks.
   - Results tables (`.tsv`) and metadata (`.json`).
-  - Standalone peak shape profiling via `peak_shape.py` for comparing two bigWig
-    tracks over a BED of regions (with delta metrics and plots).
+  - Peak shape profiling via the integrated `peakforge peakshape` subcommand or
+    the standalone `peak_shape.py` module for comparing two bigWig tracks over a
+    BED of regions (with delta metrics and plots).
 
 ---
 
@@ -118,7 +119,7 @@ The repository also ships a standalone shape-profiling utility for comparing
 two signal tracks over a shared set of genomic regions:
 
 ```bash
-python peak_shape.py \
+./peakforge peakshape \
   --bigwig-a sampleA.bw \
   --bigwig-b sampleB.bw \
   --bed peaks.bed \
@@ -126,6 +127,9 @@ python peak_shape.py \
   --flank 1000 3000 \
   --out results/shape
 ```
+
+The same interface is available by calling `python peak_shape.py` directly if
+you prefer using the module as a standalone script.
 
 For each interval the script normalises the signal, computes FWHM, core:flank
 ratios, centroid shifts, and skewness, then records the per-sample values plus

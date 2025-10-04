@@ -46,8 +46,9 @@ class Interval:
         return self.end - self.start
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Peak shape analysis")
+def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register peak shape CLI arguments on an existing parser."""
+
     parser.add_argument("--bigwig-a", required=True, help="Path to sample A bigWig")
     parser.add_argument("--bigwig-b", required=True, help="Path to sample B bigWig")
     parser.add_argument("--bed", required=True, help="BED file with regions")
@@ -82,7 +83,17 @@ def parse_args() -> argparse.Namespace:
         default="results/shape",
         help="Output directory for tables and plots",
     )
-    return parser.parse_args()
+    parser.add_argument("--log-level", default="INFO", help="Logging level")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Peak shape analysis")
+    add_cli_arguments(parser)
+    return parser
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
 
 
 def load_bed(path: str) -> List[Interval]:
@@ -381,10 +392,19 @@ def build_outlier_heatmap(
     plt.close()
 
 
-def main() -> None:
-    args = parse_args()
+def configure_logging(level: str) -> None:
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=log_level, format="[%(levelname)s] %(message)s")
+    else:
+        root_logger.setLevel(log_level)
+    LOGGER.setLevel(log_level)
 
-    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
+def run_peak_shape(args: argparse.Namespace) -> None:
+    configure_logging(args.log_level)
+
     LOGGER.info("Loading intervals from %s", args.bed)
     intervals = load_bed(args.bed)
     LOGGER.info("Loaded %d intervals", len(intervals))
@@ -458,6 +478,11 @@ def main() -> None:
     build_outlier_heatmap(df, plots_dir=plots_dir, max_peaks=50, bins=200)
 
     LOGGER.info("Analysis complete")
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = parse_args(argv)
+    run_peak_shape(args)
 
 
 if __name__ == "__main__":

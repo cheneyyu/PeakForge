@@ -75,6 +75,8 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     gseapy = None
 
+import peak_shape
+
 
 # ---------------------------------------------------------------------------
 # Data classes and utility helpers
@@ -1222,6 +1224,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_arguments(run_parser)
 
+    peakshape_parser = subparsers.add_parser(
+        "peakshape",
+        help="Run peak shape profiling for two bigWig tracks",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    peak_shape.add_cli_arguments(peakshape_parser)
+
     return parser
 
 
@@ -1246,6 +1255,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         elif args.command == "runmode":
             samples = build_runmode_samples(args)
             run_pipeline(args, samples=samples, metadata_path=None)
+        elif args.command == "peakshape":
+            peak_shape.run_peak_shape(args)
         else:  # pragma: no cover - defensive guard
             parser.print_help()
             sys.exit(1)
