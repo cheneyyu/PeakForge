@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 import pyranges as pr
+from io_utils import ensure_integer_columns, read_bed_frame
 
 try:  # pragma: no cover - optional dependency
     import pyBigWig  # type: ignore
@@ -147,14 +148,9 @@ class PriorRegistry:
     # ------------------------------------------------------------------
 
     def _load_prior_bed(self, path: Path) -> pr.PyRanges:
-        df = pd.read_csv(path, sep="\t", comment="#", header=None, dtype={0: str})
-        if df.shape[1] < 3:
-            raise ValueError(f"Prior BED file {path} must have at least 3 columns")
-        base = df.iloc[:, :3].copy()
-        base.columns = ["Chromosome", "Start", "End"]
-        base["Start"] = pd.to_numeric(base["Start"], errors="raise")
-        base["End"] = pd.to_numeric(base["End"], errors="raise")
-        return pr.PyRanges(base)
+        frame = read_bed_frame(path)
+        frame = ensure_integer_columns(frame, ("Start", "End"))
+        return pr.PyRanges(frame)
 
     def _load_prior_stats(self, path: Path) -> Dict[str, _ShapeStat]:
         lowered = path.suffix.lower()

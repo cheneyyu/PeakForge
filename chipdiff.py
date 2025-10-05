@@ -76,6 +76,7 @@ except ImportError:  # pragma: no cover - optional dependency
     gseapy = None
 
 import peak_shape
+from io_utils import ensure_integer_columns, read_bed_frame
 from prior_utils import PriorRegistry, load_prior_manifest
 
 
@@ -207,6 +208,16 @@ def read_table(path: Path) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _normalise_optional_path(value: object) -> Optional[Path]:
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and stripped not in {"-", "NA", "None", "nan"}:
+            return Path(stripped)
+    return None
+
+
 def load_samples(metadata_path: Path) -> List[SampleEntry]:
     df = read_table(metadata_path)
     required = {"sample", "condition", "bam"}
@@ -215,14 +226,17 @@ def load_samples(metadata_path: Path) -> List[SampleEntry]:
         raise ValueError(f"Metadata file missing required columns: {', '.join(sorted(missing))}")
 
     entries: List[SampleEntry] = []
-    for _, row in df.iterrows():
-        peaks_val = row.get("peaks")
-        peaks = Path(str(peaks_val)) if isinstance(peaks_val, str) and peaks_val.strip() not in {"", "-", "NA", "None"} else None
-        peak_type = str(row.get("peak_type", "auto")).lower()
+    for row in df.itertuples(index=False):
+        sample = getattr(row, "sample")
+        condition = getattr(row, "condition")
+        bam = getattr(row, "bam")
+        peaks = _normalise_optional_path(getattr(row, "peaks", None))
+        peak_type_raw = getattr(row, "peak_type", "auto")
+        peak_type = str(peak_type_raw).lower() if peak_type_raw is not None else "auto"
         entry = SampleEntry(
-            sample=str(row["sample"]),
-            condition=str(row["condition"]),
-            bam=Path(str(row["bam"])),
+            sample=str(sample),
+            condition=str(condition),
+            bam=Path(str(bam)),
             peaks=peaks,
             peak_type=peak_type,
         )
@@ -254,26 +268,20 @@ def infer_peak_type(path: Path, declared: str, default: str) -> str:
 def read_peak_file(path: Path, peak_type: str, summit_extension: int) -> pr.PyRanges:
     """Load peaks into a :class:`pyranges.PyRanges` object."""
 
-    df = pd.read_csv(path, sep="\t", comment="#", header=None, dtype={0: str})
-    if df.shape[1] < 3:
-        raise ValueError(f"Peak file {path} must have at least 3 columns")
-    df = df.iloc[:, :3]
-    df.columns = ["Chromosome", "Start", "End"]
+    frame = read_bed_frame(path)
+    frame = ensure_integer_columns(frame, ("Start", "End"))
 
     if peak_type == "summit":
-        center = (df["Start"].astype(int)).to_numpy()
-        df["Start"] = np.maximum(center - summit_extension, 0)
-        df["End"] = center + summit_extension
+        center = frame["Start"].to_numpy()
+        frame["Start"] = np.maximum(center - summit_extension, 0)
+        frame["End"] = center + summit_extension
     elif peak_type == "narrow":
-        start = df["Start"].astype(int) - summit_extension
-        end = df["End"].astype(int) + summit_extension
-        df["Start"] = np.maximum(start, 0)
-        df["End"] = end
-    else:  # broad
-        df["Start"] = df["Start"].astype(int)
-        df["End"] = df["End"].astype(int)
+        start = frame["Start"].to_numpy() - summit_extension
+        end = frame["End"].to_numpy() + summit_extension
+        frame["Start"] = np.maximum(start, 0)
+        frame["End"] = end
 
-    return pr.PyRanges(df)
+    return pr.PyRanges(frame)
 
 
 def call_macs2(sample: SampleEntry, *, output_dir: Path, macs2_genome: str, macs2_qval: float,
@@ -357,24 +365,27 @@ def build_consensus(peak_ranges: Dict[str, pr.PyRanges], *, min_overlap: int) ->
     """Build consensus peaks across samples with minimum overlap criteria."""
 
     logging.info("Building consensus peaks across %d samples", len(peak_ranges))
+    if not peak_ranges:
+        return pr.PyRanges()
     combined = pr.concat(list(peak_ranges.values()))
     clustered = combined.cluster()
     df = clustered.df
 
-    consensus_rows = []
-    for cluster_id, group in df.groupby("Cluster"):
-        samples = group["Sample"].unique()
-        if len(samples) < min_overlap:
-            continue
-        chrom = group["Chromosome"].iloc[0]
-        start = int(group["Start"].min())
-        end = int(group["End"].max())
-        consensus_rows.append((chrom, start, end, len(samples)))
+    grouped = (
+        df.groupby("Cluster")
+        .agg(
+            Chromosome=("Chromosome", "first"),
+            Start=("Start", "min"),
+            End=("End", "max"),
+            Support=("Sample", pd.Series.nunique),
+        )
+        .reset_index(drop=True)
+    )
 
-    consensus_df = pd.DataFrame(consensus_rows, columns=["Chromosome", "Start", "End", "Support"])
+    consensus_df = grouped[grouped["Support"] >= max(1, min_overlap)].copy()
     consensus_df.sort_values(["Chromosome", "Start", "End"], inplace=True)
     consensus_df.reset_index(drop=True, inplace=True)
-    consensus_df["Name"] = [f"consensus_{i+1}" for i in range(len(consensus_df))]
+    consensus_df["Name"] = [f"consensus_{i + 1}" for i in range(len(consensus_df))]
     return pr.PyRanges(consensus_df[["Chromosome", "Start", "End", "Name", "Support"]])
 
 
@@ -392,8 +403,7 @@ def load_consensus_bed(path: Path) -> pr.PyRanges:
 
     base = df.iloc[:, :3].copy()
     base.columns = ["Chromosome", "Start", "End"]
-    base["Start"] = pd.to_numeric(base["Start"], errors="raise")
-    base["End"] = pd.to_numeric(base["End"], errors="raise")
+    base = ensure_integer_columns(base, ("Start", "End"))
 
     names: List[str] = []
     provided_names = df.iloc[:, 3] if df.shape[1] >= 4 else None
