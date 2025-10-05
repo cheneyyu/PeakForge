@@ -45,8 +45,9 @@ Beyond standard replicate-aware testing, the pipeline supports single-sample vs 
   - Heatmap of top differential peaks.
   - Results tables (`.tsv`) and metadata (`.json`).
   - Peak shape profiling via the integrated `peakforge peakshape` subcommand or
-    the standalone `peak_shape.py` module for comparing two bigWig tracks over a
-    BED of regions (with delta metrics and plots).
+    the standalone `peak_shape.py` module for comparing two coverage bigWig
+    tracks (or BAMs that are auto-converted to bigWigs) over a BED of regions
+    with delta metrics and plots.
 - **Prior Integration (optional)**
   - PeakForge can now borrow information from public datasets (ENCODE, Roadmap Epigenomics, etc.) as priors for peak calling and shape comparison. This allows robust analysis even when biological replicates are limited, by regularizing peak width, intensity, and shape metrics using prior distributions.
   - Supply priors via `--prior-bed`, `--prior-bigwig`, `--prior-manifest`, and tune their influence with `--prior-weight` for `tsvmode`/`runmode`. Shape profiling accepts `--prior-shape` to compute prior-informed z-scores.
@@ -133,7 +134,11 @@ Key files generated under `results/` include:
 ## 🔍 Peak shape analysis module
 
 The repository also ships a standalone shape-profiling utility for comparing
-two signal tracks over a shared set of genomic regions:
+two signal tracks over a shared set of genomic regions. The tool expects
+coverage-style bigWigs such as those produced by `deepTools bamCoverage`
+(`--outFileFormat bigwig`). Any normalisation supported by bamCoverage is
+acceptable (RPKM is the default), but both tracks should use the same bin size
+and normalisation so the delta metrics are meaningful.
 
 ```bash
 ./peakforge peakshape \
@@ -147,6 +152,22 @@ two signal tracks over a shared set of genomic regions:
 
 The same interface is available by calling `python peak_shape.py` directly if
 you prefer using the module as a standalone script.
+
+When bigWigs are not already available you can point the command at BAM files
+instead and PeakForge will invoke `bamCoverage` internally to create matching
+tracks (by default using 10 bp bins and RPKM normalisation):
+
+```bash
+./peakforge peakshape \
+  --bam-a sampleA.bam \
+  --bam-b sampleB.bam \
+  --bed peaks.bed \
+  --bamcoverage-bin-size 25 \
+  --bamcoverage-normalization CPM
+```
+
+Pass additional options to `bamCoverage` (for example `--extendReads` or
+`--ignoreDuplicates`) via `--bamcoverage-extra-args "--extendReads --centerReads"`.
 
 For each interval the script normalises the signal, computes FWHM, core:flank
 ratios, centroid shifts, and skewness, then records the per-sample values plus

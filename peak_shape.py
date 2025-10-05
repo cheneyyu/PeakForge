@@ -14,10 +14,14 @@ import atexit
 import logging
 import math
 import os
+import shlex
+import shutil
+import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -52,8 +56,20 @@ class Interval:
 def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
     """Register peak shape CLI arguments on an existing parser."""
 
-    parser.add_argument("--bigwig-a", required=True, help="Path to sample A bigWig")
-    parser.add_argument("--bigwig-b", required=True, help="Path to sample B bigWig")
+    input_a = parser.add_mutually_exclusive_group(required=True)
+    input_a.add_argument("--bigwig-a", help="Path to sample A bigWig track")
+    input_a.add_argument(
+        "--bam-a",
+        help="Path to sample A BAM (auto-converted to bigWig via bamCoverage)",
+    )
+
+    input_b = parser.add_mutually_exclusive_group(required=True)
+    input_b.add_argument("--bigwig-b", help="Path to sample B bigWig track")
+    input_b.add_argument(
+        "--bam-b",
+        help="Path to sample B BAM (auto-converted to bigWig via bamCoverage)",
+    )
+
     parser.add_argument("--bed", required=True, help="BED file with regions")
     parser.add_argument(
         "--core",
@@ -96,6 +112,22 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
         default=0.3,
         help="Strength of prior regularisation for shape metrics",
     )
+    parser.add_argument(
+        "--bamcoverage-bin-size",
+        type=int,
+        default=10,
+        help="Bin size (bp) for bamCoverage when converting BAM inputs",
+    )
+    parser.add_argument(
+        "--bamcoverage-normalization",
+        default="RPKM",
+        help="bamCoverage normalisation method (e.g. RPKM, CPM, RPGC, or 'none')",
+    )
+    parser.add_argument(
+        "--bamcoverage-extra-args",
+        default="",
+        help="Additional bamCoverage arguments (quoted string)",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level")
 
 
@@ -134,6 +166,7 @@ BIGWIG_PATHS: Dict[str, str] = {}
 THREAD_LOCAL = threading.local()
 OPEN_HANDLES: List[pyBigWig.pyBigWig] = []
 OPEN_HANDLES_LOCK = threading.Lock()
+TEMP_DIRECTORIES: List[tempfile.TemporaryDirectory] = []
 
 
 def _register_handle(handle: pyBigWig.pyBigWig) -> None:
@@ -155,6 +188,18 @@ def _close_handles() -> None:
 atexit.register(_close_handles)
 
 
+def _cleanup_temp_directories() -> None:
+    while TEMP_DIRECTORIES:
+        temp_dir = TEMP_DIRECTORIES.pop()
+        try:
+            temp_dir.cleanup()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            continue
+
+
+atexit.register(_cleanup_temp_directories)
+
+
 def get_bigwig(sample: str) -> pyBigWig.pyBigWig:
     handles = getattr(THREAD_LOCAL, "handles", None)
     if handles is None:
@@ -166,6 +211,53 @@ def get_bigwig(sample: str) -> pyBigWig.pyBigWig:
         handles[sample] = bw
         _register_handle(bw)
     return bw
+
+
+def run_subprocess(cmd: Sequence[str]) -> None:
+    LOGGER.info("Running command: %s", " ".join(cmd))
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Command failed with exit code {result.returncode}: {' '.join(cmd)}"
+        )
+
+
+def bam_to_bigwig(sample: str, bam_path: str, args: argparse.Namespace) -> str:
+    if shutil.which("bamCoverage") is None:
+        raise RuntimeError(
+            "bamCoverage not found on PATH. Install deepTools to convert BAM inputs."
+        )
+
+    bin_size = max(1, int(getattr(args, "bamcoverage_bin_size", 10)))
+    normalization = getattr(args, "bamcoverage_normalization", "RPKM")
+    extra = getattr(args, "bamcoverage_extra_args", "")
+
+    temp_dir = tempfile.TemporaryDirectory(prefix=f"peakshape_{sample}_")
+    TEMP_DIRECTORIES.append(temp_dir)
+    output_path = Path(temp_dir.name) / f"{sample}.bw"
+
+    cmd: List[str] = [
+        "bamCoverage",
+        "--bam",
+        bam_path,
+        "--outFileName",
+        str(output_path),
+        "--outFileFormat",
+        "bigwig",
+        "--binSize",
+        str(bin_size),
+    ]
+
+    if normalization and normalization.lower() != "none":
+        cmd.extend(["--normalizeUsing", normalization])
+
+    if extra:
+        cmd.extend(shlex.split(extra))
+
+    run_subprocess(cmd)
+
+    LOGGER.info("Converted %s to bigWig at %s", bam_path, output_path)
+    return str(output_path)
 
 
 def fetch_signal(sample: str, interval: Interval) -> Optional[np.ndarray]:
@@ -430,8 +522,29 @@ def run_peak_shape(args: argparse.Namespace) -> None:
     intervals = load_bed(args.bed)
     LOGGER.info("Loaded %d intervals", len(intervals))
 
-    BIGWIG_PATHS["A"] = args.bigwig_a
-    BIGWIG_PATHS["B"] = args.bigwig_b
+    BIGWIG_PATHS.clear()
+    _close_handles()
+    THREAD_LOCAL.handles = {}
+
+    if getattr(args, "bigwig_a", None):
+        BIGWIG_PATHS["A"] = args.bigwig_a
+    else:
+        bam_a = getattr(args, "bam_a", None)
+        if bam_a is None:
+            raise ValueError("Either --bigwig-a or --bam-a must be provided")
+        if not os.path.exists(bam_a):
+            raise FileNotFoundError(f"BAM file for sample A not found: {bam_a}")
+        BIGWIG_PATHS["A"] = bam_to_bigwig("A", bam_a, args)
+
+    if getattr(args, "bigwig_b", None):
+        BIGWIG_PATHS["B"] = args.bigwig_b
+    else:
+        bam_b = getattr(args, "bam_b", None)
+        if bam_b is None:
+            raise ValueError("Either --bigwig-b or --bam-b must be provided")
+        if not os.path.exists(bam_b):
+            raise FileNotFoundError(f"BAM file for sample B not found: {bam_b}")
+        BIGWIG_PATHS["B"] = bam_to_bigwig("B", bam_b, args)
 
     # Validate bigWig accessibility
     for sample, path in BIGWIG_PATHS.items():
@@ -518,7 +631,13 @@ def run_peak_shape(args: argparse.Namespace) -> None:
             )
             if prior_plot is not None:
                 LOGGER.info("Wrote prior vs observed shape plot to %s", prior_plot)
-        prior_registry.save_distributions(Path(output_dir) / "metadata" / "prior_shape_distributions.json")
+        prior_registry.save_distributions(
+            Path(output_dir) / "metadata" / "prior_shape_distributions.json"
+        )
+
+    _close_handles()
+    THREAD_LOCAL.handles = {}
+    _cleanup_temp_directories()
 
     create_histogram(
         df["delta_FWHM"],
