@@ -42,4 +42,8 @@ generated files land in `data/` under this directory.
 Replace `data/demo_sample_*.bw` and `data/demo_regions.bed` with your own tracks
 and regions to visualise real datasets.  The helper script simply ensures the
 input files exist; if you supply your own data, skip the generation step and run
-`run_peak_shape.sh` directly.
+`run_peak_shape.sh` directly.  Real analyses work best with coverage bigWigs
+generated via `bamCoverage --outFileFormat bigwig` (use the same bin size and
+normalisation for both samples).  If you only have BAMs available, call the
+module with `--bam-a`/`--bam-b` to let PeakForge produce temporary bigWigs for
+you.
