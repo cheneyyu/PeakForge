@@ -76,6 +76,7 @@ except ImportError:  # pragma: no cover - optional dependency
     gseapy = None
 
 import peak_shape
+from prior_utils import PriorRegistry, load_prior_manifest
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +314,15 @@ def call_macs2(sample: SampleEntry, *, output_dir: Path, macs2_genome: str, macs
     return peak_path
 
 
-def load_all_peaks(samples: List[SampleEntry], *, summit_extension: int, default_peak_type: str,
-                   macs2_params: Dict[str, str], peak_output_dir: Path) -> Dict[str, pr.PyRanges]:
+def load_all_peaks(
+    samples: List[SampleEntry],
+    *,
+    summit_extension: int,
+    default_peak_type: str,
+    macs2_params: Dict[str, str],
+    peak_output_dir: Path,
+    prior_registry: Optional[PriorRegistry] = None,
+) -> Dict[str, pr.PyRanges]:
     """Ensure every sample has peak calls and return PyRanges per sample."""
 
     peak_ranges: Dict[str, pr.PyRanges] = {}
@@ -340,6 +348,8 @@ def load_all_peaks(samples: List[SampleEntry], *, summit_extension: int, default
         df["Sample"] = sample.sample
         pr_obj = pr.PyRanges(df)
         peak_ranges[sample.sample] = pr_obj
+        if prior_registry is not None and prior_registry.enabled:
+            prior_registry.record_sample(sample.sample, pr_obj.df)
     return peak_ranges
 
 
@@ -920,6 +930,70 @@ def run_pipeline(
 
     results_dir = ensure_directory(Path(args.output_dir))
 
+    prior_manifest_value = getattr(args, "prior_manifest", None)
+    manifest_data: Dict[str, object] = {}
+    manifest_dir: Optional[Path] = None
+    if prior_manifest_value:
+        manifest_path = Path(prior_manifest_value)
+        manifest_data = load_prior_manifest(manifest_path)
+        manifest_dir = manifest_path.parent
+
+    def _manifest_lookup(*keys: str) -> Optional[object]:
+        for key in keys:
+            if key in manifest_data:
+                return manifest_data[key]
+        return None
+
+    def _normalise_path(value: object) -> Optional[Path]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text in {"-", "None", "none", "NA", "na"}:
+            return None
+        path = Path(text).expanduser()
+        if manifest_dir and not path.is_absolute():
+            path = (manifest_dir / path).expanduser()
+        return path
+
+    prior_bed_path = _normalise_path(getattr(args, "prior_bed", None))
+    if prior_bed_path is None:
+        prior_bed_path = _normalise_path(_manifest_lookup("prior_bed", "bed", "peaks"))
+
+    prior_bigwig_path = _normalise_path(getattr(args, "prior_bigwig", None))
+    if prior_bigwig_path is None:
+        prior_bigwig_path = _normalise_path(_manifest_lookup("prior_bigwig", "bigwig", "bw"))
+
+    prior_stats_path = _normalise_path(_manifest_lookup("prior_stats", "stats", "shape", "shape_stats"))
+
+    manifest_weight = _manifest_lookup("prior_weight", "weight")
+    if manifest_weight is not None:
+        try:
+            prior_weight = float(manifest_weight)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Prior manifest weight must be numeric, received {manifest_weight!r}"
+            ) from exc
+    else:
+        prior_weight = float(getattr(args, "prior_weight", 0.3))
+    if prior_weight < 0:
+        raise ValueError("--prior-weight must be non-negative")
+
+    prior_registry = PriorRegistry(
+        prior_bed=prior_bed_path,
+        prior_bigwig=prior_bigwig_path,
+        prior_stats=prior_stats_path,
+        weight=prior_weight,
+    )
+    prior_registry.load_prior_distributions()
+    if prior_registry.enabled:
+        logging.info(
+            "Prior integration enabled (weight=%.2f, bed=%s, bigwig=%s, stats=%s)",
+            prior_registry.weight,
+            prior_bed_path,
+            prior_bigwig_path,
+            prior_stats_path,
+        )
+
     consensus: pr.PyRanges
     consensus_bed = results_dir / "consensus_peaks.bed"
     consensus_metadata: Dict[str, Optional[str]] = {
@@ -940,6 +1014,7 @@ def run_pipeline(
             default_peak_type=args.peak_type,
             macs2_params=macs2_params,
             peak_output_dir=Path(args.peak_dir),
+            prior_registry=prior_registry,
         )
 
         consensus = build_consensus(peak_ranges, min_overlap=args.min_overlap)
@@ -952,6 +1027,14 @@ def run_pipeline(
         ensure_directory(consensus_bed.parent)
         if consensus_path.resolve() != consensus_bed.resolve():
             shutil.copyfile(consensus_path, consensus_bed)
+
+    if prior_registry.enabled:
+        prior_registry.record_consensus(consensus.df)
+        prior_registry.write_peak_tables(results_dir)
+        summary = prior_registry.summarize()
+        consensus_metadata["prior_overlap_fraction"] = summary.get("consensus_peaks_fraction_overlap")
+        consensus_metadata["prior_overlap_count"] = summary.get("consensus_peaks_overlap")
+        consensus_metadata["prior_average_weight"] = summary.get("consensus_average_weight")
 
     if len(consensus) == 0:
         raise ValueError("Consensus peak set is empty; cannot proceed with counting")
@@ -1022,13 +1105,52 @@ def run_pipeline(
         raise ValueError(f"Counts matrix missing columns for samples: {', '.join(missing_cols)}")
     counts_df = counts_df[[s.sample for s in samples]]
 
+    if prior_registry.enabled:
+        consensus_prior_weights = prior_registry.get_consensus_weights(counts_df.index)
+    else:
+        consensus_prior_weights = pd.Series(0.0, index=counts_df.index, dtype=float)
+
     diff_res = call_differential_analysis(counts_df, conditions, library_sizes)
+
+    diff_res["prior_weight"] = consensus_prior_weights
+    diff_res["prior_overlap"] = consensus_prior_weights > 0
 
     diff_path = results_dir / "differential_results.tsv"
     diff_res.to_csv(diff_path, sep="\t")
 
+    prior_adjusted_path: Optional[Path] = None
+    if prior_registry.enabled and not diff_res.empty:
+        overlap_factor = consensus_prior_weights.clip(0, 1)
+        shrink_factor = 1.0 - prior_registry.weight * (1.0 - overlap_factor)
+        penalty_factor = 1.0 + prior_registry.weight * (1.0 - overlap_factor)
+        prior_adjusted = diff_res.copy()
+        prior_adjusted["prior_weight"] = overlap_factor
+        prior_adjusted["prior_overlap"] = overlap_factor > 0
+        prior_adjusted["log2FC_prior"] = diff_res["log2FC"] * shrink_factor
+        if "log2FC_shrunk" in diff_res.columns:
+            prior_adjusted["log2FC_shrunk_prior"] = diff_res["log2FC_shrunk"] * shrink_factor
+        if "lfcSE" in diff_res.columns:
+            prior_adjusted["lfcSE_prior"] = diff_res["lfcSE"] * penalty_factor
+        if "pvalue" in diff_res.columns:
+            prior_adjusted["pvalue_prior"] = np.minimum(1.0, diff_res["pvalue"] * penalty_factor)
+            prior_adjusted["padj_prior"] = benjamini_hochberg(prior_adjusted["pvalue_prior"]).fillna(1.0)
+        prior_adjusted_path = results_dir / "differential_results_prior.tsv"
+        prior_adjusted.to_csv(prior_adjusted_path, sep="\t")
+
     plot_dir = results_dir / "plots"
     plot_paths = generate_differential_plots(diff_res, counts_df, plot_dir)
+
+    if prior_registry.enabled:
+        observed_metrics = {
+            "width": (consensus.df["End"] - consensus.df["Start"]).astype(float),
+            "intensity": counts_df.mean(axis=1),
+        }
+        prior_plot = prior_registry.plot_prior_vs_observed(
+            observed_metrics, plot_dir / "prior_vs_observed.png"
+        )
+        if prior_plot is not None:
+            plot_paths["prior_vs_observed"] = prior_plot
+        prior_registry.save_distributions(results_dir / "metadata" / "prior_distributions.json")
 
     annotation_df = None
     annotation_path = None
@@ -1073,11 +1195,13 @@ def run_pipeline(
         "samples": sample_metadata,
         "counts_matrix": str(counts_tsv),
         "differential_results": str(diff_path),
+        "differential_results_prior": str(prior_adjusted_path) if prior_adjusted_path else None,
         "plots": {key: str(path) for key, path in plot_paths.items()},
         "annotation": str(annotation_path) if annotation_path else None,
         "enrichr": str(enrichr_path) if enrichr_path else None,
         "library_sizes": {name: float(value) for name, value in library_sizes.to_dict().items()},
         "consensus": consensus_metadata,
+        "prior": prior_registry.metadata_entry(),
     }
     save_metadata(metadata, results_dir / "metadata.json")
 
@@ -1172,6 +1296,15 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         nargs=argparse.REMAINDER,
         default=[],
         help="Additional arguments for MACS2",
+    )
+    parser.add_argument("--prior-bed", help="BED file describing prior peaks")
+    parser.add_argument("--prior-bigwig", help="bigWig of reference signal intensities for priors")
+    parser.add_argument("--prior-manifest", help="Manifest (JSON or key=value) describing prior resources")
+    parser.add_argument(
+        "--prior-weight",
+        type=float,
+        default=0.3,
+        help="Strength of the prior regularisation (0 disables influence)",
     )
     parser.add_argument(
         "--threads",
