@@ -47,6 +47,9 @@ Beyond standard replicate-aware testing, the pipeline supports single-sample vs 
   - Peak shape profiling via the integrated `peakforge peakshape` subcommand or
     the standalone `peak_shape.py` module for comparing two bigWig tracks over a
     BED of regions (with delta metrics and plots).
+- **Prior Integration (optional)**
+  - PeakForge can now borrow information from public datasets (ENCODE, Roadmap Epigenomics, etc.) as priors for peak calling and shape comparison. This allows robust analysis even when biological replicates are limited, by regularizing peak width, intensity, and shape metrics using prior distributions.
+  - Supply priors via `--prior-bed`, `--prior-bigwig`, `--prior-manifest`, and tune their influence with `--prior-weight` for `tsvmode`/`runmode`. Shape profiling accepts `--prior-shape` to compute prior-informed z-scores.
 
 ---
 
@@ -99,6 +102,17 @@ The sheet can be tab- or comma-delimited and must include the columns `sample`, 
 
 This run will call peaks (if needed), build consensus peaks across samples, compute counts, perform PyDESeq2-based differential analysis when replicates are present (falling back to MARS otherwise), optionally annotate peaks, and generate standard comparison plots.
 
+To bias the same analysis toward a trusted reference atlas, add the prior options:
+
+```bash
+./peakforge tsvmode samples.tsv \
+  --output-dir results_prior \
+  --prior-bed encode_H3K27ac_consensus.bed \
+  --prior-weight 0.4
+```
+
+This keeps the raw statistics while also emitting a prior-adjusted `differential_results_prior.tsv` table.
+
 `multiBamSummary` is invoked with `--numberOfProcessors 16` by default; override with `--threads` if you need a different level of parallelism.
 
 ### Output overview
@@ -107,9 +121,12 @@ Key files generated under `results/` include:
 
 - `counts.tsv` – consensus peak counts matrix.
 - `differential_results.tsv` – unified differential analysis table (method annotated per peak).
+- `differential_results_prior.tsv` – prior-adjusted differential statistics with overlap weights and penalised p-values.
 - `plots/` – volcano, MA, correlation, and heatmap figures.
+- `plots/prior_vs_observed.png` – comparison of prior peak distributions versus observed metrics.
 - `plots/differential_summary.png` – clusterProfiler-style overview of significant peaks.
 - `metadata.json` – run configuration and provenance metadata.
+- `peaks_prior_overlap.tsv` / `peaks_prior_novel.tsv` – optional tables summarising prior overlaps when priors are supplied.
 
 ---
 
@@ -158,6 +175,8 @@ To help you get started quickly, the repository ships with an end-to-end example
 - **HepG2 MYC** – replicates [`ENCFF315AUW.bam`, `ENCFF987GJQ.bam`]
 
 The scripts in `example/` orchestrate downloading the public alignments and executing the PeakForge pipeline for the 2 vs 2 comparison. The dataset comprises four compact (downsampled) BAM files; make sure all four are present before running `run_pipeline.sh` so the analysis has the expected inputs.
+
+To see the new prior-aware workflow in action, run `example/run_with_prior.sh` which bootstraps demo priors, executes the `tsvmode` pipeline with `--prior-manifest`, and then performs peak shape profiling with `--prior-shape` on the synthetic bigWigs.
 
 1. **Prepare the inputs**
    ```bash

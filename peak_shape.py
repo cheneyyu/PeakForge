@@ -16,6 +16,7 @@ import math
 import os
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -26,6 +27,8 @@ from scipy import stats
 
 
 LOGGER = logging.getLogger(__name__)
+
+from prior_utils import PriorRegistry
 
 
 @dataclass
@@ -82,6 +85,16 @@ def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
         "--out",
         default="results/shape",
         help="Output directory for tables and plots",
+    )
+    parser.add_argument(
+        "--prior-shape",
+        help="TSV or JSON file providing prior distributions for shape metrics",
+    )
+    parser.add_argument(
+        "--prior-weight",
+        type=float,
+        default=0.3,
+        help="Strength of prior regularisation for shape metrics",
     )
     parser.add_argument("--log-level", default="INFO", help="Logging level")
 
@@ -405,6 +418,14 @@ def configure_logging(level: str) -> None:
 def run_peak_shape(args: argparse.Namespace) -> None:
     configure_logging(args.log_level)
 
+    prior_weight = max(0.0, float(getattr(args, "prior_weight", 0.3)))
+    prior_registry = PriorRegistry(prior_stats=getattr(args, "prior_shape", None), weight=prior_weight)
+    prior_registry.load_prior_distributions()
+    if prior_registry.enabled:
+        LOGGER.info(
+            "Shape prior enabled (weight=%.2f, stats=%s)", prior_registry.weight, args.prior_shape
+        )
+
     LOGGER.info("Loading intervals from %s", args.bed)
     intervals = load_bed(args.bed)
     LOGGER.info("Loaded %d intervals", len(intervals))
@@ -444,6 +465,33 @@ def run_peak_shape(args: argparse.Namespace) -> None:
             results = list(executor.map(lambda iv: process_interval(iv, config), intervals))
 
     df = pd.DataFrame(results)
+
+    shape_metric_map = {
+        "FWHM": ("A_FWHM", "B_FWHM"),
+        "core_flank_ratio": ("A_core_flank", "B_core_flank"),
+        "centroid": ("A_centroid", "B_centroid"),
+        "skewness": ("A_skewness", "B_skewness"),
+    }
+    if prior_registry.enabled and prior_registry.has_shape_priors:
+        z_columns: List[str] = []
+        for metric, columns in shape_metric_map.items():
+            if metric not in prior_registry.shape_stats:
+                continue
+            for column in columns:
+                z_col = f"{column}_z"
+                series = pd.to_numeric(df[column], errors="coerce")
+                df[z_col] = prior_registry.zscore(metric, series)
+                z_columns.append(z_col)
+        if z_columns:
+            deviation = df[z_columns].abs().mean(axis=1, skipna=True)
+            df["PriorShapeDeviation"] = deviation
+            df["PriorShapeCategory"] = np.where(deviation > 2.0, "prior_outlier", "within_prior")
+            LOGGER.info(
+                "Computed prior shape deviation (median=%.2f, %d outliers)",
+                float(deviation.median(skipna=True)),
+                int((deviation > 2.0).sum()),
+            )
+
     df["delta_FWHM"] = df["B_FWHM"] - df["A_FWHM"]
     df["delta_core_flank"] = df["B_core_flank"] - df["A_core_flank"]
     df["delta_centroid"] = df["B_centroid"] - df["A_centroid"]
@@ -455,6 +503,22 @@ def run_peak_shape(args: argparse.Namespace) -> None:
     df_export = df.drop(columns=["A_signal", "B_signal"])
     df_export.to_csv(table_path, sep="\t", index=False, float_format="%.6f")
     LOGGER.info("Wrote metrics table to %s", table_path)
+
+    if prior_registry.enabled and prior_registry.has_shape_priors:
+        observed_shape: Dict[str, pd.Series] = {}
+        for metric, columns in shape_metric_map.items():
+            if metric not in prior_registry.shape_stats:
+                continue
+            series_a = pd.to_numeric(df[columns[0]], errors="coerce")
+            series_b = pd.to_numeric(df[columns[1]], errors="coerce")
+            observed_shape[metric] = pd.concat([series_a, series_b], ignore_index=True)
+        if observed_shape:
+            prior_plot = prior_registry.plot_prior_vs_observed(
+                observed_shape, Path(plots_dir) / "prior_vs_observed.png"
+            )
+            if prior_plot is not None:
+                LOGGER.info("Wrote prior vs observed shape plot to %s", prior_plot)
+        prior_registry.save_distributions(Path(output_dir) / "metadata" / "prior_shape_distributions.json")
 
     create_histogram(
         df["delta_FWHM"],
