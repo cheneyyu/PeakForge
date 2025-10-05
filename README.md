@@ -63,7 +63,19 @@ and the `peakforge peakshape` subcommand.
 - JSON metadata capturing run configuration and summary statistics.
 - Peak-shape delta metrics and plots when the dedicated subcommand is invoked.
 
----
+### Flexible inputs
+- Accepts paired-end or single-end BAM files.
+- Consumes existing MACS2 peak files (`summits.bed`, `narrowPeak`, or `broadPeak`).
+- Automatically launches MACS2 when only BAMs are supplied, with support for narrow, summit, or broad peak modes.
+
+### Consensus peak management
+- Enforces a configurable minimum overlap between samples.
+- Expands summit and narrow peaks symmetrically (default ±250 bp) while leaving broad calls intact.
+- Optionally reuses an existing consensus BED to guarantee identical genomic intervals between runs.
+
+### Counting and quantification
+- Uses deepTools `multiBamSummary BED-file` to build a counts matrix that is exported as TSV alongside the `.npz` archive.
+- Calculates library sizes via `samtools idxstats` for single-sample MARS testing.
 
 ## Installation
 
