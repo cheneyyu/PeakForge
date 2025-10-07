@@ -26,16 +26,56 @@ PeakForge is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CU
 - Emits `differential_results.tsv` plus optional annotations and enrichment tables.
 
 ### Optional prior integration
-- Incorporates public resources (e.g. ENCODE, Roadmap Epigenomics) to regularise peak width, intensity, and shape metrics.
-- Accepts priors via `--prior-bed`, `--prior-bigwig`, `--prior-manifest`, or `--prior-shape` with tunable weights.
-- Peak shape profiling can reuse priors through the standalone `peak_shape.py` module or the `peakforge peakshape` subcommand.
+PeakForge can blend public resources into the analysis to stabilise peak statistics or down-weight outliers that deviate from
+well-characterised regulatory regions.  The `PriorRegistry` orchestrates this behaviour and is shared by both the main pipeline
+and the `peakforge peakshape` subcommand.
+
+#### Supported prior artefacts
+- **BED intervals** (`--prior-bed` or manifest `prior_bed`): define a catalogue of curated peaks.  The loader normalises the
+  coordinates, converts them into a `PyRanges` object, and computes width distributions alongside per-peak overlap counts.
+- **bigWig tracks** (`--prior-bigwig` or manifest `prior_bigwig`): summarise signal intensity across the prior intervals using
+  `pyBigWig`.  The median and standard deviation of these summaries are recorded when available.
+- **Shape statistics** (`--prior-shape` / `--prior-stats` or manifest `prior_stats`): provide distributional expectations for
+  per-peak metrics such as summit sharpness or shoulder ratios.  JSON, TSV, CSV, and wide-format tables are supported.
+- **Manifest** (`--prior-manifest`): centralises the above paths and the default mixing `prior_weight`.  Relative paths resolve
+  relative to the manifest location, making it easy to ship priors alongside a project.
+
+#### How priors influence scoring
+1. Peak widths from the prior BED are used to compute a reference mean and standard deviation.  Each observed peak receives a
+   z-score (`WidthZ`).
+2. Peaks that overlap at least one prior interval are treated as familiar and inherit the configured `prior_weight` directly.
+   Non-overlapping peaks apply a *novelty penalty* that scales with the width z-score, reducing (but not eliminating) the weight
+   assigned to novel events.
+3. When shape statistics or bigWig intensities are provided, the registry mixes observed scores with the prior expectations,
+   yielding adjusted metrics via `adjust_scores`.  This ensures that poorly covered peaks can still be ranked sensibly.
+4. The per-peak weights are exposed through `get_consensus_weights`, allowing downstream logic to incorporate them when
+   prioritising differential hits or plotting ranked lists.
+
+#### Outputs and reporting
+- For every sample PeakForge records overlap tables (`peaks_prior_all.tsv`, `peaks_prior_overlap.tsv`, `peaks_prior_novel.tsv`).
+- Consensus peaks inherit the same statistics and are saved with effective weights plus overlap counts.
+- Summary JSON files capture aggregate overlap fractions, mean weights, and provenance of prior artefacts for reproducibility.
+- Optional distribution JSON (`prior_distributions.json`) and comparative density plots (`prior_vs_observed.png`) can be
+  produced for audit trails or supplementary figures.
 
 ### Outputs and visualisation
 - Volcano plots, MA plots, sample correlation heatmaps, and top-peak heatmaps.
 - JSON metadata capturing run configuration and summary statistics.
 - Peak-shape delta metrics and plots when the dedicated subcommand is invoked.
 
----
+### Flexible inputs
+- Accepts paired-end or single-end BAM files.
+- Consumes existing MACS2 peak files (`summits.bed`, `narrowPeak`, or `broadPeak`).
+- Automatically launches MACS2 when only BAMs are supplied, with support for narrow, summit, or broad peak modes.
+
+### Consensus peak management
+- Enforces a configurable minimum overlap between samples.
+- Expands summit and narrow peaks symmetrically (default ±250 bp) while leaving broad calls intact.
+- Optionally reuses an existing consensus BED to guarantee identical genomic intervals between runs.
+
+### Counting and quantification
+- Uses deepTools `multiBamSummary BED-file` to build a counts matrix that is exported as TSV alongside the `.npz` archive.
+- Calculates library sizes via `samtools idxstats` for single-sample MARS testing.
 
 ## Installation
 
