@@ -59,23 +59,16 @@ and the `peakforge peakshape` subcommand.
   produced for audit trails or supplementary figures.
 
 ### Outputs and visualisation
-- Volcano plots, MA plots, sample correlation heatmaps, and top-peak heatmaps.
-- JSON metadata capturing run configuration and summary statistics.
-- Peak-shape delta metrics and plots when the dedicated subcommand is invoked.
+- Volcano plots, MA plots, sample correlation heatmaps, and top-peak heatmaps summarise differential results.
+- JSON metadata captures run configuration, library sizes, and provenance of priors for reproducibility.
+- The `peakforge peakshape` subcommand emits peak-shape delta metrics and comparison plots for signal profiling.
 
-### Flexible inputs
-- Accepts paired-end or single-end BAM files.
-- Consumes existing MACS2 peak files (`summits.bed`, `narrowPeak`, or `broadPeak`).
-- Automatically launches MACS2 when only BAMs are supplied, with support for narrow, summit, or broad peak modes.
-
-### Consensus peak management
-- Enforces a configurable minimum overlap between samples.
-- Expands summit and narrow peaks symmetrically (default ±250 bp) while leaving broad calls intact.
-- Optionally reuses an existing consensus BED to guarantee identical genomic intervals between runs.
-
-### Counting and quantification
-- Uses deepTools `multiBamSummary BED-file` to build a counts matrix that is exported as TSV alongside the `.npz` archive.
-- Calculates library sizes via `samtools idxstats` for single-sample MARS testing.
+### Pipeline summary
+1. Validate inputs and (optionally) call MACS2 to ensure each sample has peaks.
+2. Merge peak calls into a consensus catalogue that respects the requested overlap threshold.
+3. Quantify read counts per consensus interval with deepTools and estimate library sizes via `samtools idxstats`.
+4. Automatically select PyDESeq2 (replicates present) or the MARS test (no replicates) for differential analysis.
+5. Generate plots, summary tables, and optional annotations/enrichment reports under the output directory.
 
 ## Installation
 
@@ -89,6 +82,16 @@ and the `peakforge peakshape` subcommand.
 pip install numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy pydeseq2
 conda install -c bioconda macs2 deeptools samtools
 ```
+
+### Verify installation
+After installing the dependencies, confirm that the CLI is reachable and that optional tooling is on your `PATH`:
+
+```bash
+./peakforge --help
+which macs2 samtools multiBamSummary
+```
+
+If any of the external tools are missing you can re-run the `conda install` command or add them to an existing environment.
 
 ---
 
@@ -160,6 +163,14 @@ Bootstraps priors, runs `tsvmode` with `--prior-manifest`, and performs peak-sha
 
 ## Reusing consensus peaks
 Any completed PeakForge analysis writes `consensus_peaks.bed` inside the output directory. Passing that file to either `tsvmode` or `runmode` through `--consensus-peaks` preserves genomic intervals across follow-up contrasts, keeping fold-change estimates directly comparable.
+
+---
+
+## Troubleshooting
+
+- **Missing optional dependencies** – PyDESeq2, gseapy, and pyBigWig are only required for specific features. If the CLI warns about a missing module you can either install it (`pip install pydeseq2 gseapy pybigwig`) or run the pipeline without that capability.
+- **External tool failures** – PeakForge wraps MACS2, deepTools, and samtools. Check their versions with `macs2 --version`, `multiBamSummary --version`, and `samtools --version` if a subprocess error occurs.
+- **Empty consensus sets** – ensure that MACS2 produced peaks or provide existing peak files via the metadata sheet. Lowering `--min-overlap` can help when combining sparse datasets.
 
 ---
 
