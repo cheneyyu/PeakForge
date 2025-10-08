@@ -30,6 +30,35 @@ PeakForge can blend public resources into the analysis to stabilise peak statist
 well-characterised regulatory regions.  The `PriorRegistry` orchestrates this behaviour and is shared by both the main pipeline
 and the `peakforge peakshape` subcommand.
 
+#### Building priors in practice
+Many users asked how to *produce* and *ship* priors rather than only consume them.  A pragmatic workflow is:
+
+1. **Curate a BED catalogue** – Start from high-quality replicates or public consortia data (ENCODE, BLUEPRINT, etc.).  Merge
+   overlapping intervals (for example with `bedtools merge -d 50`) so the catalogue reflects the regulatory territory you
+   trust.  This file becomes the `--prior-bed` input.
+2. **Summarise intensity with bigWigs** – Generate signal tracks that reflect the typical coverage over those regions.  A common
+   pattern is `bamCoverage --normalizeUsing RPGC ... --outFileName reference.bw` followed by `multiBigwigSummary BED-file --bwfiles reference.bw --outRawCounts reference_prior.tsv --outFileName /tmp/ignore.npz`.  The resulting bigWig is supplied through
+   `--prior-bigwig` so PeakForge can compute expected read densities per prior interval.【F:prior_utils.py†L139-L149】
+3. **Capture shape statistics** – Run `peakforge peakshape` (or `python peak_shape.py`) on the same training samples to export
+   per-peak metrics.  The command `peakforge peakshape --peaks curated.bed --bam reference.bam --prior-shape stats.tsv` will emit
+   a TSV that records distributions for width, summit sharpness, shoulder ratios, etc.  These statistics inform z-score scaling
+   and novelty penalties when passed to `--prior-shape` / `--prior-stats`.
+4. **Describe everything with a manifest** – Place the BED, bigWig, and stats file in a directory alongside a `prior_manifest.json`:
+
+   ```json
+   {
+     "prior_bed": "prior_catalogue.bed",
+     "prior_bigwig": "reference.bw",
+     "prior_stats": "stats.tsv",
+     "prior_weight": 0.4
+   }
+   ```
+
+   Shipping this folder with your project makes it trivial for collaborators to reproduce the same prior-aware analysis via
+   `--prior-manifest`.
+
+The `example/run_with_prior.sh` script bootstraps a miniature manifest that demonstrates the whole workflow end to end.【F:example/run_with_prior.sh†L6-L66】
+
 #### Supported prior artefacts
 - **BED intervals** (`--prior-bed` or manifest `prior_bed`): define a catalogue of curated peaks.  The loader normalises the
   coordinates, converts them into a `PyRanges` object, and computes width distributions alongside per-peak overlap counts.
@@ -50,6 +79,32 @@ and the `peakforge peakshape` subcommand.
    yielding adjusted metrics via `adjust_scores`.  This ensures that poorly covered peaks can still be ranked sensibly.
 4. The per-peak weights are exposed through `get_consensus_weights`, allowing downstream logic to incorporate them when
    prioritising differential hits or plotting ranked lists.
+
+#### Why priors matter for 1 vs 1 contrasts
+Single replicate contrasts (1 treatment vs 1 control) lean on the MARS test, which has limited power to distinguish noise from
+signal without additional information.【F:chipdiff.py†L1086-L1146】  Priors counteract this by providing reference behaviour for
+well-characterised loci:
+
+- **Overlap-driven shrinkage** – When an observed peak intersects the prior catalogue, its log fold-change is retained.  Novel
+  peaks have their `log2FC` (and, when available, `log2FC_shrunk`) multiplied by `1 - w · (1 - overlap_fraction)`, where `w` is
+  `--prior-weight`.  This tempers aggressive fold-changes from noisy loci while preserving validated regions.【F:chipdiff.py†L1125-L1145】
+- **Penalty-aware p-values** – Novel peaks also inherit a `penalty_factor = 1 + w · (1 - overlap_fraction)` that inflates
+  p-values and standard errors.  When the prior weight is non-zero this makes the MARS output less overconfident in unexplored
+  regions, which is especially helpful with only two libraries.【F:chipdiff.py†L1125-L1146】
+- **Shape sanity checks** – Feeding shape priors into `peakforge peakshape` highlights peaks with atypical summit profiles
+  (`PriorShapeCategory`), flagging candidates that may deserve manual inspection before being called differential hits.【F:peak_shape.py†L513-L635】
+
+When tuning for 1v1 work:
+
+1. Start with a moderate `--prior-weight` such as `0.3–0.5`.  Inspect `differential_results_prior.tsv` to ensure familiar loci
+   remain high-confidence while novel peaks are merely down-weighted rather than discarded.【F:chipdiff.py†L1132-L1148】
+2. Review the overlap tables (`peaks_prior_overlap.tsv`, `peaks_prior_novel.tsv`) to gauge how much of your catalogue is
+   supported by the data.【F:prior_utils.py†L398-L404】
+3. Use the generated `prior_vs_observed.png` plot to confirm that observed signal distributions roughly align with the priors;
+   large discrepancies indicate that the weight should be reduced or the catalogue refreshed.【F:prior_utils.py†L444-L495】
+
+Following these steps gives the sparse 1 vs 1 branch enough context to stabilise fold-change estimates without hiding truly novel
+biology.
 
 #### Outputs and reporting
 - For every sample PeakForge records overlap tables (`peaks_prior_all.tsv`, `peaks_prior_overlap.tsv`, `peaks_prior_novel.tsv`).
