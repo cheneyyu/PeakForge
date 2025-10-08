@@ -124,7 +124,7 @@ def evaluate_pair(main_bundle: ResultBundle, sub_bundle: ResultBundle, top_n: in
         merged = pairs.drop_duplicates()
         merged["log2FC_main"] = main_bundle.significant.loc[merged["Peak_main"], "log2FC"].to_numpy()
         merged["log2FC_sub"] = sub_bundle.significant.loc[merged["Peak_sub"], "log2FC"].to_numpy()
-        concordance = float((np.sign(merged["log2FC_main"]) == np.sign(merged["log2FC_sub"]).mean()))
+        concordance = float((np.sign(merged["log2FC_main"]) == np.sign(merged["log2FC_sub"])).mean())
         if overlap_count > 1:
             spearman_r, spearman_p = stats.spearmanr(merged["log2FC_main"], merged["log2FC_sub"])
         mean_abs_diff = float(np.mean(np.abs(merged["log2FC_main"] - merged["log2FC_sub"])))
