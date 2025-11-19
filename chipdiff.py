@@ -13,16 +13,16 @@ comma-delimited text file with the following required columns:
 
 Optional columns:
 
-    peaks    Path to an existing peak file (summits.bed, narrowPeak, broadPeak)
-    peak_type    One of {auto, narrow, broad, summit}.  ``auto`` (default)
+    peaks    Path to an existing peak file (narrowPeak or broadPeak)
+    peak_type    One of {auto, narrow, broad}.  ``auto`` (default)
                  attempts to infer the peak type from the file name.
 
 Example TSV sample sheet::
 
     sample  condition   bam                 peaks               peak_type
-    S1      treated     data/S1.bam         data/S1_summits.bed summit
+    S1      treated     data/S1.bam         data/S1_peaks.bed   narrow
     S2      treated     data/S2.bam         -                   -
-    C1      control     data/C1.bam         data/C1_peaks.bed   narrow
+    C1      control     data/C1.bam         data/C1_broad.bed   broad
 
 The pipeline performs the following steps:
 
@@ -252,32 +252,32 @@ def load_samples(metadata_path: Path) -> List[SampleEntry]:
 
 def infer_peak_type(path: Path, declared: str, default: str) -> str:
     if declared and declared not in {"", "auto", "nan"}:
-        if declared not in {"narrow", "broad", "summit"}:
-            raise ValueError(f"Unknown peak_type '{declared}' for file {path}")
+        if declared not in {"narrow", "broad"}:
+            raise ValueError(
+                f"Unknown peak_type '{declared}' for file {path}; only 'narrow' and 'broad' are supported"
+            )
         return declared
     name = path.name.lower()
-    if "summit" in name:
-        return "summit"
     if name.endswith(".broadpeak"):
         return "broad"
     if name.endswith(".narrowpeak"):
         return "narrow"
+    if "summit" in name:
+        raise ValueError(
+            "Summit-only BED files are no longer supported; please provide a narrowPeak or broadPeak file"
+        )
     return default
 
 
-def read_peak_file(path: Path, peak_type: str, summit_extension: int) -> pr.PyRanges:
+def read_peak_file(path: Path, peak_type: str, peak_extension: int) -> pr.PyRanges:
     """Load peaks into a :class:`pyranges.PyRanges` object."""
 
     frame = read_bed_frame(path)
     frame = ensure_integer_columns(frame, ("Start", "End"))
 
-    if peak_type == "summit":
-        center = frame["Start"].to_numpy()
-        frame["Start"] = np.maximum(center - summit_extension, 0)
-        frame["End"] = center + summit_extension
-    elif peak_type == "narrow":
-        start = frame["Start"].to_numpy() - summit_extension
-        end = frame["End"].to_numpy() + summit_extension
+    if peak_type == "narrow":
+        start = frame["Start"].to_numpy() - peak_extension
+        end = frame["End"].to_numpy() + peak_extension
         frame["Start"] = np.maximum(start, 0)
         frame["End"] = end
 
@@ -311,12 +311,8 @@ def call_macs2(sample: SampleEntry, *, output_dir: Path, macs2_genome: str, macs
 
     if peak_type == "broad":
         peak_path = output_dir / f"{name}_peaks.broadPeak"
-    elif peak_type == "summit":
-        peak_path = output_dir / f"{name}_summits.bed"
     else:
-        # Prefer summits if available, otherwise narrowPeak
-        summit_path = output_dir / f"{name}_summits.bed"
-        peak_path = summit_path if summit_path.exists() else output_dir / f"{name}_peaks.narrowPeak"
+        peak_path = output_dir / f"{name}_peaks.narrowPeak"
     if not peak_path.exists():
         raise FileNotFoundError(f"MACS2 output not found for sample {sample.sample}: {peak_path}")
     return peak_path
@@ -325,7 +321,7 @@ def call_macs2(sample: SampleEntry, *, output_dir: Path, macs2_genome: str, macs
 def load_all_peaks(
     samples: List[SampleEntry],
     *,
-    summit_extension: int,
+    peak_extension: int,
     default_peak_type: str,
     macs2_params: Dict[str, str],
     peak_output_dir: Path,
@@ -351,7 +347,7 @@ def load_all_peaks(
             peak_path = sample.peaks
             logging.info("Using provided peaks for sample %s (%s)", sample.sample, peak_type)
 
-        pr_obj = read_peak_file(Path(peak_path), peak_type, summit_extension)
+        pr_obj = read_peak_file(Path(peak_path), peak_type, peak_extension)
         df = pr_obj.df
         df["Sample"] = sample.sample
         pr_obj = pr.PyRanges(df)
@@ -1020,7 +1016,7 @@ def run_pipeline(
         }
         peak_ranges = load_all_peaks(
             samples,
-            summit_extension=args.summit_extension,
+            peak_extension=args.peak_extension,
             default_peak_type=args.peak_type,
             macs2_params=macs2_params,
             peak_output_dir=Path(args.peak_dir),
@@ -1284,14 +1280,14 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--peak-type",
         default="narrow",
-        choices=["narrow", "broad", "summit"],
+        choices=["narrow", "broad"],
         help="Default peak type when calling MACS2",
     )
     parser.add_argument(
-        "--summit-extension",
+        "--peak-extension",
         type=int,
         default=250,
-        help="Extension for summits/narrow peaks (bp)",
+        help="Extension for narrow peaks when building consensus windows (bp)",
     )
     parser.add_argument(
         "--min-overlap",

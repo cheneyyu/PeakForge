@@ -17,8 +17,8 @@ Required arguments:
   --b-bams FILE [FILE ...]   One or more BAMs belonging to condition B
 
 Optional arguments:
-  --a-peaks FILE [FILE ...]  Peak files aligned with --a-bams (summits.bed,
-                             narrowPeak, or broadPeak). When provided, MACS2
+  --a-peaks FILE [FILE ...]  Peak files aligned with --a-bams (narrowPeak or
+                             broadPeak). When provided, MACS2
                              is skipped for those samples.
   --b-peaks FILE [FILE ...]  Peak files aligned with --b-bams.
   --consensus-peaks FILE     Reuse an existing consensus BED instead of
@@ -27,28 +27,28 @@ Optional arguments:
   --threads N                Threads for multiBamSummary (default: 16)
   --min-overlap N            Minimum samples required for consensus peaks (default: 2)
   --peak-type TYPE           Default peak type when calling MACS2 (default: narrow)
-  --summit-extension BP      Summit extension/half-window size (default: 250)
+  --peak-extension BP        Extension/half-window size for narrow peaks (default: 250)
   --macs2-genome G           Genome size string passed to MACS2 (default: hs)
   -h, --help                 Show this help message and exit
 
 Examples:
-  # 1 vs 1 with provided summits
+  # 1 vs 1 with provided narrow peaks
   bash run_example2.sh \
     --condition-a K562 \
     --a-bams data/K562_rep1.bam \
-    --a-peaks results/2v2/peaks/K562_rep1_summits.bed \
+    --a-peaks results/2v2/peaks/K562_rep1_peaks.narrowPeak \
     --condition-b HepG2 \
     --b-bams data/HepG2_rep1.bam \
-    --b-peaks results/2v2/peaks/HepG2_rep1_summits.bed
+    --b-peaks results/2v2/peaks/HepG2_rep1_peaks.narrowPeak
 
   # 2 vs 2 using replicate peaks
   bash run_example2.sh \
     --condition-a K562 \
     --a-bams data/K562_rep1.bam data/K562_rep2.bam \
-    --a-peaks results/2v2/peaks/K562_rep1_summits.bed results/2v2/peaks/K562_rep2_summits.bed \
+    --a-peaks results/2v2/peaks/K562_rep1_peaks.narrowPeak results/2v2/peaks/K562_rep2_peaks.narrowPeak \
     --condition-b HepG2 \
     --b-bams data/HepG2_rep1.bam data/HepG2_rep2.bam \
-    --b-peaks results/2v2/peaks/HepG2_rep1_summits.bed results/2v2/peaks/HepG2_rep2_summits.bed
+    --b-peaks results/2v2/peaks/HepG2_rep1_peaks.narrowPeak results/2v2/peaks/HepG2_rep2_peaks.narrowPeak
 USAGE
 }
 
@@ -61,7 +61,7 @@ OUTPUT_DIR="${SCRIPT_DIR}/results/example2"
 THREADS=16
 MIN_OVERLAP=2
 PEAK_TYPE="narrow"
-SUMMIT_EXTENSION=250
+PEAK_EXTENSION=250
 MACS2_GENOME="hs"
 A_BAMS=()
 B_BAMS=()
@@ -132,8 +132,8 @@ while [[ $# -gt 0 ]]; do
       PEAK_TYPE="$2"
       shift 2
       ;;
-    --summit-extension)
-      SUMMIT_EXTENSION="$2"
+    --peak-extension)
+      PEAK_EXTENSION="$2"
       shift 2
       ;;
     --macs2-genome)
@@ -194,7 +194,7 @@ CMD=(
   --peak-dir "${OUTPUT_DIR}/peaks"
   --min-overlap "${MIN_OVERLAP}"
   --peak-type "${PEAK_TYPE}"
-  --summit-extension "${SUMMIT_EXTENSION}"
+  --peak-extension "${PEAK_EXTENSION}"
   --macs2-genome "${MACS2_GENOME}"
   --threads "${THREADS}"
 )

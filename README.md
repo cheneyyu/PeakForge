@@ -1,6 +1,6 @@
 # PeakForge
 
-PeakForge is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CUT&Tag, and ChIP-seq differential analysis. It ingests BAM files or pre-called MACS2 peaks, builds consensus intervals, quantifies coverage, and performs replicate-aware or no-replicate differential testing. Single-sample contrasts remain supported through an implementation of the MARS test so motif and regulon shifts remain discoverable even when only rich individual libraries are available.
+PeakForge is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CUT&Tag, and ChIP-seq differential analysis. It ingests BAM files or pre-called MACS2 peaks, builds consensus intervals, quantifies coverage, and performs replicate-aware or no-replicate differential testing. Single-sample contrasts remain supported through an implementation of the MARS (MA-plot-based Random Sampling) test so motif and regulon shifts remain discoverable even when only rich individual libraries are available.
 
 ---
 
@@ -8,20 +8,20 @@ PeakForge is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CU
 
 ### Flexible inputs
 - Accepts paired-end or single-end BAM files.
-- Consumes existing MACS2 peak files (`summits.bed`, `narrowPeak`, or `broadPeak`).
-- Automatically launches MACS2 when only BAMs are supplied, with support for narrow, summit, or broad peak modes.
+- Consumes existing MACS2 peak files (`narrowPeak` or `broadPeak`).
+- Automatically launches MACS2 when only BAMs are supplied, with support for narrow or broad peak modes.
 
 ### Consensus peak management
 - Enforces a configurable minimum overlap between samples.
-- Expands summit and narrow peaks symmetrically (default ±250 bp) while leaving broad calls intact.
+- Expands narrow peaks symmetrically (default ±250 bp via `--peak-extension`) while leaving broad calls intact.
 - Optionally reuses an existing consensus BED to guarantee identical genomic intervals between runs.
 
 ### Counting and quantification
 - Uses deepTools `multiBamSummary BED-file` to build a counts matrix that is exported as TSV alongside the `.npz` archive.
-- Calculates library sizes via `samtools idxstats` for single-sample MARS testing.
+- Calculates library sizes via `samtools idxstats` for single-sample MARS (MA-plot-based Random Sampling) testing.
 
 ### Differential analysis
-- Automatically chooses between the PyDESeq2 workflow (replicates present) and the MARS test (no replicates).
+- Automatically chooses between the PyDESeq2 workflow (replicates present) and the MARS (MA-plot-based Random Sampling) test (no replicates).
 - Supports contrasts with multiple replicates per condition as well as 1 vs 1 comparisons.
 - Emits `differential_results.tsv` plus optional annotations and enrichment tables.
 
@@ -81,9 +81,7 @@ The `example/run_with_prior.sh` script bootstraps a miniature manifest that demo
    prioritising differential hits or plotting ranked lists.
 
 #### Why priors matter for 1 vs 1 contrasts
-Single replicate contrasts (1 treatment vs 1 control) lean on the MARS test, which has limited power to distinguish noise from
-signal without additional information.【F:chipdiff.py†L1086-L1146】  Priors counteract this by providing reference behaviour for
-well-characterised loci:
+Single replicate contrasts (1 treatment vs 1 control) lean on the MARS (MA-plot-based Random Sampling) test, which has limited power to distinguish noise from signal without additional information.【F:chipdiff.py†L1086-L1146】  Priors counteract this by providing reference behaviour for well-characterised loci:
 
 - **Overlap-driven shrinkage** – When an observed peak intersects the prior catalogue, its log fold-change is retained.  Novel
   peaks have their `log2FC` (and, when available, `log2FC_shrunk`) multiplied by `1 - w · (1 - overlap_fraction)`, where `w` is
@@ -122,7 +120,7 @@ biology.
 1. Validate inputs and (optionally) call MACS2 to ensure each sample has peaks.
 2. Merge peak calls into a consensus catalogue that respects the requested overlap threshold.
 3. Quantify read counts per consensus interval with deepTools and estimate library sizes via `samtools idxstats`.
-4. Automatically select PyDESeq2 (replicates present) or the MARS test (no replicates) for differential analysis.
+4. Automatically select PyDESeq2 (replicates present) or the MARS (MA-plot-based Random Sampling) test (no replicates) for differential analysis.
 5. Generate plots, summary tables, and optional annotations/enrichment reports under the output directory.
 
 ## Installation
@@ -158,19 +156,31 @@ If any of the external tools are missing you can re-run the `conda install` comm
 
 ### Sample sheet format
 
-The sheet can be tab- or comma-delimited and must include `sample`, `condition`, and `bam`. Optional columns let you supply pre-called peaks.
+The sheet can be tab- or comma-delimited and must include `sample`, `condition`, and `bam`. Optional columns let you supply pre-called peaks as MACS2 `narrowPeak` or `broadPeak` files.
 
-| sample | condition | bam             | peaks                 | peak_type |
-|--------|-----------|-----------------|-----------------------|-----------|
-| S1     | treated   | data/S1.bam     | data/S1_summits.bed   | summit    |
-| S2     | treated   | data/S2.bam     | -                     | -         |
-| C1     | control   | data/C1.bam     | data/C1_peaks.bed     | narrow    |
+#### 1 vs 1 (narrow peaks)
+
+| sample   | condition | bam                         | peaks                                   | peak_type |
+|----------|-----------|-----------------------------|-----------------------------------------|-----------|
+| K562_rep1 | treated   | example/data/K562_rep1.bam  | example/results/narrow/K562_rep1_peaks.narrowPeak | narrow    |
+| HepG2_rep1 | control | example/data/HepG2_rep1.bam | example/results/narrow/HepG2_rep1_peaks.narrowPeak | narrow    |
+
+#### 2 vs 2 (broad peaks)
+
+| sample     | condition | bam                         | peaks                                        | peak_type |
+|------------|-----------|-----------------------------|----------------------------------------------|-----------|
+| K562_rep1  | K562      | example/data/K562_rep1.bam  | example/results/broad/K562_rep1_peaks.broadPeak | broad     |
+| K562_rep2  | K562      | example/data/K562_rep2.bam  | example/results/broad/K562_rep2_peaks.broadPeak | broad     |
+| HepG2_rep1 | HepG2     | example/data/HepG2_rep1.bam | example/results/broad/HepG2_rep1_peaks.broadPeak | broad     |
+| HepG2_rep2 | HepG2     | example/data/HepG2_rep2.bam | example/results/broad/HepG2_rep2_peaks.broadPeak | broad     |
 
 ### Example command
 ```bash
 ./peakforge tsvmode samples.tsv \
   --output-dir results \
   --peak-dir peaks \
+  --peak-type narrow \
+  --peak-extension 250 \
   --min-overlap 2 \
   --gtf annotations.gtf \
   --enrichr
@@ -187,32 +197,73 @@ The `example/` directory orchestrates a matched ENCODE MYC ChIP-seq dataset (hg3
 ```bash
 bash example/run_pipeline.sh
 ```
-Generates results under `example/results/`, including `consensus_peaks.bed` that can be reused with `--consensus-peaks` in later runs.
+Generates results under `example/results/`, including `consensus_peaks.bed` that can be reused with `--consensus-peaks` in later runs. Internally the script executes the following PeakForge command (with `THREADS` defaulting to 16):
+
+```bash
+./peakforge tsvmode example/data/metadata.tsv \
+  --output-dir example/results/2v2 \
+  --peak-dir example/results/2v2/peaks \
+  --peak-type narrow \
+  --peak-extension 250 \
+  --min-overlap 2 \
+  --macs2-genome hs \
+  --threads 16
+```
 
 ### No-replicate 1 vs 1 analysis
 ```bash
 bash example/run_example_1v1.sh
 ```
-Exercises the MARS branch via `metadata_1v1.tsv`, producing outputs in `example/results_1v1/`.
+Exercises the MARS branch via `metadata_1v1.tsv`, producing outputs in `example/results_1v1/`. The wrapped CLI call is:
+
+```bash
+./peakforge tsvmode example/data/metadata_1v1.tsv \
+  --output-dir example/results_1v1 \
+  --peak-dir example/results_1v1/peaks \
+  --peak-type narrow \
+  --peak-extension 250 \
+  --min-overlap 1 \
+  --macs2-genome hs \
+  --threads 16
+```
 
 ### Custom inputs with existing peaks
 ```bash
 bash example/run_example2.sh \
   --condition-a K562 \
   --a-bams example/data/K562_rep1.bam example/data/K562_rep2.bam \
-  --a-peaks example/results/2v2/peaks/K562_rep1_summits.bed example/results/2v2/peaks/K562_rep2_summits.bed \
+  --a-peaks example/results/2v2/peaks/K562_rep1_peaks.narrowPeak example/results/2v2/peaks/K562_rep2_peaks.narrowPeak \
   --condition-b HepG2 \
   --b-bams example/data/HepG2_rep1.bam example/data/HepG2_rep2.bam \
-  --b-peaks example/results/2v2/peaks/HepG2_rep1_summits.bed example/results/2v2/peaks/HepG2_rep2_summits.bed \
+  --b-peaks example/results/2v2/peaks/HepG2_rep1_peaks.narrowPeak example/results/2v2/peaks/HepG2_rep2_peaks.narrowPeak \
   --consensus-peaks example/results/2v2/consensus_peaks.bed
 ```
 Skips MACS2 when peaks are provided and reuses consensus intervals for consistent comparisons.
+The helper ultimately invokes `python chipdiff.py runmode` with the supplied arguments plus `--peak-type narrow --peak-extension 250 --min-overlap 2 --macs2-genome hs --threads 16`, so you can copy/paste the expanded command if you prefer to run PeakForge directly.
 
 ### Prior-aware demo
 ```bash
 bash example/run_with_prior.sh
 ```
-Bootstraps priors, runs `tsvmode` with `--prior-manifest`, and performs peak-shape profiling with `--prior-shape`.
+Bootstraps priors, runs `tsvmode` with `--prior-manifest`, and performs peak-shape profiling with `--prior-shape`. The manifest contains `prior_bed`, `prior_stats`, and `prior_weight` entries; the script then calls:
+
+```bash
+./peakforge tsvmode example/data/metadata_1v1.tsv \
+  --output-dir results/prior_demo \
+  --peak-dir results/prior_demo/peaks \
+  --prior-manifest results/prior_demo/prior_inputs/prior_manifest.json \
+  --prior-weight 0.4
+
+./peakforge peakshape \
+  --bigwig-a example/peak_shape/data/demo_sample_A.bw \
+  --bigwig-b example/peak_shape/data/demo_sample_B.bw \
+  --bed example/peak_shape/data/demo_regions.bed \
+  --core 400 \
+  --flank 800 2000 \
+  --out results/prior_demo/shape \
+  --prior-shape results/prior_demo/prior_inputs/demo_shape.json \
+  --prior-weight 0.4
+```
 
 ---
 
