@@ -158,14 +158,14 @@ If any of the external tools are missing you can re-run the `conda install` comm
 
 The sheet can be tab- or comma-delimited and must include `sample`, `condition`, and `bam`. Optional columns let you supply pre-called peaks as MACS2 `narrowPeak` or `broadPeak` files.
 
-#### 1 vs 1 (narrow peaks)
+#### 1 vs 1 
 
 | sample   | condition | bam                         | peaks                                   | peak_type |
 |----------|-----------|-----------------------------|-----------------------------------------|-----------|
 | K562_rep1 | treated   | example/data/K562_rep1.bam  | example/results/narrow/K562_rep1_peaks.narrowPeak | narrow    |
 | HepG2_rep1 | control | example/data/HepG2_rep1.bam | example/results/narrow/HepG2_rep1_peaks.narrowPeak | narrow    |
 
-#### 2 vs 2 (broad peaks)
+#### 2 vs 2 
 
 | sample     | condition | bam                         | peaks                                        | peak_type |
 |------------|-----------|-----------------------------|----------------------------------------------|-----------|
