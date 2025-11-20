@@ -126,14 +126,14 @@ biology.
 ## Installation
 
 ### Requirements
-- Python ≥ 3.9.
+- Python ≥ 3.10 (tested with Python 3.10).
 - Python libraries: `numpy`, `pandas`, `scipy`, `statsmodels`, `matplotlib`, `seaborn`, `pyranges`, `gseapy`, `pydeseq2`.
 - External tools: [MACS2][macs2], [deepTools][deeptools], and [samtools][samtools].
 
 ### Install commands
 ```bash
-pip install numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy pydeseq2
-conda install -c bioconda macs2 deeptools samtools
+pip install numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy pydeseq2 macs2 deeptools
+conda install -c bioconda samtools
 ```
 
 ### Verify installation

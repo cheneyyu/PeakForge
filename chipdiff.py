@@ -113,7 +113,18 @@ def ensure_commands(commands: Sequence[str]) -> None:
         joined = ", ".join(sorted(missing))
         raise RuntimeError(
             "Missing required command(s): "
-            f"{joined}. Please install them (e.g. via 'conda install -c bioconda macs2 deeptools')."
+            f"{joined}. Install MACS2 and deepTools via 'pip install macs2 deeptools' "
+            "and samtools via 'conda install -c bioconda samtools'."
+        )
+
+
+def ensure_python_version(min_version: tuple[int, int] = (3, 10)) -> None:
+    """Guard against unsupported Python interpreters."""
+
+    if sys.version_info < min_version:
+        formatted = ".".join(str(part) for part in min_version)
+        raise RuntimeError(
+            f"PeakForge requires Python {formatted} or newer; detected {sys.version.split()[0]}"
         )
 
 
@@ -1379,6 +1390,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    ensure_python_version()
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(
