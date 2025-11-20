@@ -186,6 +186,8 @@ The sheet can be tab- or comma-delimited and must include `sample`, `condition`,
   --enrichr
 ```
 This run performs peak calling (if necessary), constructs consensus intervals, quantifies counts, executes the appropriate differential workflow, annotates peaks, and produces summary plots.
+`--peak-type` controls whether MACS2 is invoked in narrow- or broad-peak mode when peaks are missing; narrow peaks are expanded symmetrically by `--peak-extension` (default 250 bp) to build the consensus, while broad peaks use their full width without extra padding.
+If you supply `narrowPeak` or `broadPeak` files in the sample sheet, PeakForge infers the mode from the extension and you can omit `--peak-type` entirely.
 
 ---
 
