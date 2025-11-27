@@ -117,7 +117,7 @@ biology.
 - The `peakforge peakshape` subcommand emits peak-shape delta metrics and comparison plots for signal profiling.
 
 ### Pipeline summary
-1. Validate inputs and (optionally) call MACS2 to ensure each sample has peaks.
+1. Validate inputs and (optionally) call MACS2 to ensure each sample has peaks (paired-end BAMs automatically use `-f BAMPE`).
 2. Merge peak calls into a consensus catalogue that respects the requested overlap threshold.
 3. Quantify read counts per consensus interval with deepTools and estimate library sizes via `samtools idxstats`.
 4. Automatically select PyDESeq2 (replicates present) or the MARS (MA-plot-based Random Sampling) test (no replicates) for differential analysis.
@@ -182,12 +182,14 @@ The sheet can be tab- or comma-delimited and must include `sample`, `condition`,
   --peak-type narrow \
   --peak-extension 250 \
   --min-overlap 2 \
+  --threads 16 \
   --gtf annotations.gtf \
   --enrichr
 ```
 This run performs peak calling (if necessary), constructs consensus intervals, quantifies counts, executes the appropriate differential workflow, annotates peaks, and produces summary plots.
-`--peak-type` controls whether MACS2 is invoked in narrow- or broad-peak mode when peaks are missing; narrow peaks are expanded symmetrically by `--peak-extension` (default 250 bp) to build the consensus, while broad peaks use their full width without extra padding.
+`--peak-type` controls whether MACS2 is invoked in narrow- or broad-peak mode when peaks are missing; narrow peaks are expanded symmetrically by `--peak-extension` (default 250 bp) to build the consensus, while broad peaks use their full width without extra padding. Paired-end BAMs are detected automatically and passed to MACS2 with `BAMPE` format.
 If you supply `narrowPeak` or `broadPeak` files in the sample sheet, PeakForge infers the mode from the extension and you can omit `--peak-type` entirely.
+`--threads` applies to deepTools counting and to any `samtools index` calls needed to compute library sizes.
 
 ---
 
