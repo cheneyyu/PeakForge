@@ -94,6 +94,7 @@ class SampleEntry:
     bam: Path
     peaks: Optional[Path] = None
     peak_type: str = "auto"
+    is_paired: Optional[bool] = None
 
     def ensure_paths(self) -> None:
         if not self.bam.exists():
@@ -158,16 +159,43 @@ def _bam_index_candidates(bam: Path) -> List[Path]:
     return unique
 
 
-def ensure_bam_index(bam: Path, samtools_path: str) -> None:
+def ensure_bam_index(bam: Path, samtools_path: str, threads: int = 1) -> None:
     for candidate in _bam_index_candidates(bam):
         if candidate.exists():
             return
     logging.info("Indexing BAM for library size estimation: %s", bam)
-    run_command([samtools_path, "index", str(bam)])
+    cmd = [samtools_path, "index"]
+    if threads > 1:
+        cmd.extend(["-@", str(threads)])
+    cmd.append(str(bam))
+    run_command(cmd)
 
 
-def bam_total_mapped_reads(bam: Path, samtools_path: str) -> int:
-    ensure_bam_index(bam, samtools_path)
+def detect_paired_end_bam(bam: Path, samtools_path: str, threads: int = 1) -> bool:
+    """Return ``True`` if the BAM contains paired-end reads."""
+
+    cmd = [samtools_path, "view", "-c", "-f", "1"]
+    if threads > 1:
+        cmd.extend(["-@", str(threads)])
+    cmd.append(str(bam))
+
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"samtools view failed for {bam} with exit code {result.returncode}: {result.stderr.strip()}"
+        )
+    try:
+        count = int(result.stdout.strip() or 0)
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise RuntimeError(f"Unable to parse samtools view output for {bam}: {result.stdout!r}") from exc
+
+    paired = count > 0
+    logging.info("Detected %s BAM for %s", "paired-end" if paired else "single-end", bam)
+    return paired
+
+
+def bam_total_mapped_reads(bam: Path, samtools_path: str, threads: int = 1) -> int:
+    ensure_bam_index(bam, samtools_path, threads)
     result = subprocess.run(
         [samtools_path, "idxstats", str(bam)],
         check=False,
@@ -196,11 +224,11 @@ def bam_total_mapped_reads(bam: Path, samtools_path: str) -> int:
     return total
 
 
-def compute_library_sizes(samples: Sequence[SampleEntry], samtools_path: str) -> pd.Series:
+def compute_library_sizes(samples: Sequence[SampleEntry], samtools_path: str, threads: int = 1) -> pd.Series:
     sizes = {}
     for sample in samples:
         logging.info("Estimating library size for sample %s", sample.sample)
-        sizes[sample.sample] = bam_total_mapped_reads(sample.bam, samtools_path)
+        sizes[sample.sample] = bam_total_mapped_reads(sample.bam, samtools_path, threads)
     return pd.Series(sizes, dtype=float)
 
 
@@ -295,8 +323,15 @@ def read_peak_file(path: Path, peak_type: str, peak_extension: int) -> pr.PyRang
     return pr.PyRanges(frame)
 
 
-def call_macs2(sample: SampleEntry, *, output_dir: Path, macs2_genome: str, macs2_qval: float,
-               peak_type: str, macs2_extra: Optional[List[str]] = None) -> Path:
+def call_macs2(
+    sample: SampleEntry,
+    *,
+    output_dir: Path,
+    macs2_genome: str,
+    macs2_qval: float,
+    peak_type: str,
+    macs2_extra: Optional[List[str]] = None,
+) -> Path:
     """Call MACS2 for a sample and return the resulting peak file path."""
 
     ensure_directory(output_dir)
@@ -315,6 +350,9 @@ def call_macs2(sample: SampleEntry, *, output_dir: Path, macs2_genome: str, macs
         "-q",
         str(macs2_qval),
     ]
+    if sample.is_paired:
+        cmd.extend(["-f", "BAMPE"])
+
     if peak_type == "broad":
         cmd.extend(["--broad"])
     cmd.extend(macs2_extra)
@@ -943,7 +981,10 @@ def run_pipeline(
     if samtools_path is None:  # pragma: no cover - defensive (ensure_commands guards)
         raise RuntimeError("samtools not found on PATH after validation")
 
-    library_sizes = compute_library_sizes(samples, samtools_path)
+    for sample in samples:
+        sample.is_paired = detect_paired_end_bam(sample.bam, samtools_path, args.threads)
+
+    library_sizes = compute_library_sizes(samples, samtools_path, args.threads)
 
     results_dir = ensure_directory(Path(args.output_dir))
 
