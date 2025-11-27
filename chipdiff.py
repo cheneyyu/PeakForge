@@ -323,7 +323,7 @@ def read_peak_file(path: Path, peak_type: str, peak_extension: int) -> pr.PyRang
     return pr.PyRanges(frame)
 
 
-def call_macs2(
+def _macs2_command(
     sample: SampleEntry,
     *,
     output_dir: Path,
@@ -331,9 +331,7 @@ def call_macs2(
     macs2_qval: float,
     peak_type: str,
     macs2_extra: Optional[List[str]] = None,
-) -> Path:
-    """Call MACS2 for a sample and return the resulting peak file path."""
-
+) -> tuple[list[str], Path]:
     ensure_directory(output_dir)
     macs2_extra = macs2_extra or []
     name = sample.sample
@@ -356,15 +354,46 @@ def call_macs2(
     if peak_type == "broad":
         cmd.extend(["--broad"])
     cmd.extend(macs2_extra)
-    run_command(cmd)
 
     if peak_type == "broad":
         peak_path = output_dir / f"{name}_peaks.broadPeak"
     else:
         peak_path = output_dir / f"{name}_peaks.narrowPeak"
+    return cmd, peak_path
+
+
+def call_macs2(
+    sample: SampleEntry,
+    *,
+    output_dir: Path,
+    macs2_genome: str,
+    macs2_qval: float,
+    peak_type: str,
+    macs2_extra: Optional[List[str]] = None,
+) -> Path:
+    """Call MACS2 for a sample and return the resulting peak file path."""
+
+    cmd, peak_path = _macs2_command(
+        sample,
+        output_dir=output_dir,
+        macs2_genome=macs2_genome,
+        macs2_qval=macs2_qval,
+        peak_type=peak_type,
+        macs2_extra=macs2_extra,
+    )
+    run_command(cmd)
+
     if not peak_path.exists():
         raise FileNotFoundError(f"MACS2 output not found for sample {sample.sample}: {peak_path}")
     return peak_path
+
+
+@dataclass
+class Macs2Job:
+    sample: SampleEntry
+    peak_type: str
+    peak_path: Path
+    process: subprocess.Popen[str]
 
 
 def load_all_peaks(
@@ -379,11 +408,13 @@ def load_all_peaks(
     """Ensure every sample has peak calls and return PyRanges per sample."""
 
     peak_ranges: Dict[str, pr.PyRanges] = {}
+    macs2_jobs: List[Macs2Job] = []
+
     for sample in samples:
         if sample.peaks is None:
             peak_type = sample.peak_type if sample.peak_type != "auto" else default_peak_type
-            logging.info("Calling MACS2 for sample %s (type=%s)", sample.sample, peak_type)
-            peak_path = call_macs2(
+            logging.info("Launching MACS2 for sample %s (type=%s)", sample.sample, peak_type)
+            cmd, peak_path = _macs2_command(
                 sample,
                 output_dir=peak_output_dir,
                 macs2_genome=macs2_params["genome"],
@@ -391,18 +422,51 @@ def load_all_peaks(
                 peak_type=peak_type,
                 macs2_extra=macs2_params.get("extra", []),
             )
+            process = subprocess.Popen(cmd)
+            macs2_jobs.append(
+                Macs2Job(
+                    sample=sample,
+                    peak_type=peak_type,
+                    peak_path=peak_path,
+                    process=process,
+                )
+            )
         else:
             peak_type = infer_peak_type(sample.peaks, sample.peak_type, default_peak_type)
             peak_path = sample.peaks
             logging.info("Using provided peaks for sample %s (%s)", sample.sample, peak_type)
 
-        pr_obj = read_peak_file(Path(peak_path), peak_type, peak_extension)
+            pr_obj = read_peak_file(Path(peak_path), peak_type, peak_extension)
+            df = pr_obj.df
+            df["Sample"] = sample.sample
+            pr_obj = pr.PyRanges(df)
+            peak_ranges[sample.sample] = pr_obj
+            if prior_registry is not None and prior_registry.enabled:
+                prior_registry.record_sample(sample.sample, pr_obj.df)
+
+    macs2_results: List[tuple[Macs2Job, int]] = []
+    for job in macs2_jobs:
+        returncode = job.process.wait()
+        macs2_results.append((job, returncode))
+
+    failed = [job for job, code in macs2_results if code != 0]
+    if failed:
+        errors = ", ".join(f"{job.sample.sample} (exit {job.process.returncode})" for job in failed)
+        raise RuntimeError(f"MACS2 failed for sample(s): {errors}")
+
+    for job, _ in macs2_results:
+        if not job.peak_path.exists():
+            raise FileNotFoundError(
+                f"MACS2 output not found for sample {job.sample.sample}: {job.peak_path}"
+            )
+
+        pr_obj = read_peak_file(Path(job.peak_path), job.peak_type, peak_extension)
         df = pr_obj.df
-        df["Sample"] = sample.sample
+        df["Sample"] = job.sample.sample
         pr_obj = pr.PyRanges(df)
-        peak_ranges[sample.sample] = pr_obj
+        peak_ranges[job.sample.sample] = pr_obj
         if prior_registry is not None and prior_registry.enabled:
-            prior_registry.record_sample(sample.sample, pr_obj.df)
+            prior_registry.record_sample(job.sample.sample, pr_obj.df)
     return peak_ranges
 
 
