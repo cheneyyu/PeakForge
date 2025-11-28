@@ -6,8 +6,6 @@ PROJECT_ROOT="$(cd "${ROOT}/.." && pwd)"
 METADATA="${ROOT}/data/metadata_1v1.tsv"
 RESULTS_DIR="${RESULTS_DIR:-${ROOT}/results_1v1}"
 THREADS="${THREADS:-16}"
-MACS_CMD="${MACS_CMD:-macs2}"
-export MACS_CMD
 
 if [[ ! -f "${METADATA}" ]]; then
   echo "Metadata sheet not found: ${METADATA}" >&2
