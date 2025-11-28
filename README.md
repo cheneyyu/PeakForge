@@ -128,20 +128,24 @@ biology.
 ### Requirements
 - Python ≥ 3.10 (tested with Python 3.10).
 - Python libraries: `numpy`, `pandas`, `scipy`, `statsmodels`, `matplotlib`, `seaborn`, `pyranges`, `gseapy`, `pydeseq2`.
-- External tools: [MACS2][macs2], [deepTools][deeptools], and [samtools][samtools].
+- External tools: [MACS2/3][macs2], [deepTools][deeptools], and [samtools][samtools].
 
 ### Install commands
 ```bash
-pip install numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy pydeseq2 macs2 deeptools
+pip install numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy pydeseq2 macs3 deeptools
 conda install -c bioconda samtools
 ```
+If you already have MACS2 available, you can substitute `macs2` for `macs3` in the pip command. Set the
+environment variable `MACS_CMD=macs3` when running PeakForge in environments (e.g., Colab) where only
+MACS3 is installed; the default remains `macs2`.
 
 ### Verify installation
 After installing the dependencies, confirm that the CLI is reachable and that optional tooling is on your `PATH`:
 
 ```bash
 ./peakforge --help
-which macs2 samtools multiBamSummary
+MACS_CMD=${MACS_CMD:-macs2}
+which "${MACS_CMD}" samtools multiBamSummary
 ```
 
 If any of the external tools are missing you can re-run the `conda install` command or add them to an existing environment.
