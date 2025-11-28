@@ -135,17 +135,14 @@ biology.
 pip install numpy pandas scipy statsmodels matplotlib seaborn pyranges gseapy pydeseq2 macs3 deeptools
 conda install -c bioconda samtools
 ```
-If you already have MACS2 available, you can substitute `macs2` for `macs3` in the pip command. Set the
-environment variable `MACS_CMD=macs3` when running PeakForge in environments (e.g., Colab) where only
-MACS3 is installed; the default remains `macs2`.
+PeakForge automatically prefers `macs2` when available and falls back to `macs3` if needed.
 
 ### Verify installation
 After installing the dependencies, confirm that the CLI is reachable and that optional tooling is on your `PATH`:
 
 ```bash
 ./peakforge --help
-MACS_CMD=${MACS_CMD:-macs2}
-which "${MACS_CMD}" samtools multiBamSummary
+which macs2 macs3 samtools multiBamSummary
 ```
 
 If any of the external tools are missing you can re-run the `conda install` command or add them to an existing environment.

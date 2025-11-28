@@ -81,8 +81,24 @@ from io_utils import ensure_integer_columns, read_bed_frame
 from prior_utils import PriorRegistry, load_prior_manifest
 
 
-MACS_COMMAND = os.getenv("MACS_CMD", "macs2")
-"""Name of the MACS executable (e.g., ``macs2`` or ``macs3``)."""
+def _detect_macs_command() -> str:
+    """Resolve the available MACS executable.
+
+    Preference is given to ``macs2`` when present; otherwise ``macs3`` is used.
+    A runtime error is raised when neither executable is found on ``PATH``.
+    """
+
+    for candidate in ("macs2", "macs3"):
+        if shutil.which(candidate):
+            return candidate
+    raise RuntimeError(
+        "Missing required command(s): macs2, macs3. Install MACS via 'pip install macs3'"
+    )
+
+
+MACS_COMMAND: Optional[str] = None
+"""Name of the resolved MACS executable (``macs2`` preferred, ``macs3`` fallback)."""
+
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +139,18 @@ def ensure_commands(commands: Sequence[str]) -> None:
             "'pip install deeptools' "
             "and samtools via 'conda install -c bioconda samtools'."
         )
+
+
+def get_macs_command() -> str:
+    """Return the available MACS executable, preferring ``macs2``.
+
+    The resolved command is cached for subsequent calls.
+    """
+
+    global MACS_COMMAND
+    if MACS_COMMAND is None:
+        MACS_COMMAND = _detect_macs_command()
+    return MACS_COMMAND
 
 
 def ensure_python_version(min_version: tuple[int, int] = (3, 10)) -> None:
@@ -343,7 +371,7 @@ def _macs2_command(
     name = sample.sample
     out_prefix = output_dir / name
     cmd = [
-        MACS_COMMAND,
+        get_macs_command(),
         "callpeak",
         "-t",
         str(sample.bam),
@@ -1044,7 +1072,7 @@ def run_pipeline(
     required_cmds = ["multiBamSummary", "samtools"]
     needs_peak_calling = consensus_path is None and any(sample.peaks is None for sample in samples)
     if needs_peak_calling:
-        required_cmds.append(MACS_COMMAND)
+        required_cmds.append(get_macs_command())
     ensure_commands(required_cmds)
 
     samtools_path = shutil.which("samtools")
