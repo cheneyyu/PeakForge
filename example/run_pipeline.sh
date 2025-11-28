@@ -7,6 +7,8 @@ DATA_DIR="${ROOT}/data"
 METADATA="${DATA_DIR}/metadata.tsv"
 RESULTS_ROOT="${RESULTS_ROOT:-${ROOT}/results}"
 THREADS="${THREADS:-16}"
+MACS_CMD="${MACS_CMD:-macs2}"
+export MACS_CMD
 
 if [[ ! -f "${METADATA}" ]]; then
   echo "Metadata sheet not found: ${METADATA}" >&2

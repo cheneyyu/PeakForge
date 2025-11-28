@@ -46,6 +46,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,10 @@ except ImportError:  # pragma: no cover - optional dependency
 import peak_shape
 from io_utils import ensure_integer_columns, read_bed_frame
 from prior_utils import PriorRegistry, load_prior_manifest
+
+
+MACS_COMMAND = os.getenv("MACS_CMD", "macs2")
+"""Name of the MACS executable (e.g., ``macs2`` or ``macs3``)."""
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +119,8 @@ def ensure_commands(commands: Sequence[str]) -> None:
         joined = ", ".join(sorted(missing))
         raise RuntimeError(
             "Missing required command(s): "
-            f"{joined}. Install MACS2 and deepTools via 'pip install macs2 deeptools' "
+            f"{joined}. Install MACS via 'pip install macs3' (or macs2) and deepTools via "
+            "'pip install deeptools' "
             "and samtools via 'conda install -c bioconda samtools'."
         )
 
@@ -337,7 +343,7 @@ def _macs2_command(
     name = sample.sample
     out_prefix = output_dir / name
     cmd = [
-        "macs2",
+        MACS_COMMAND,
         "callpeak",
         "-t",
         str(sample.bam),
@@ -1038,7 +1044,7 @@ def run_pipeline(
     required_cmds = ["multiBamSummary", "samtools"]
     needs_peak_calling = consensus_path is None and any(sample.peaks is None for sample in samples)
     if needs_peak_calling:
-        required_cmds.append("macs2")
+        required_cmds.append(MACS_COMMAND)
     ensure_commands(required_cmds)
 
     samtools_path = shutil.which("samtools")
