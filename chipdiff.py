@@ -53,7 +53,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 import numpy as np
 import pandas as pd
@@ -116,7 +116,6 @@ class SampleEntry:
     peaks: Optional[Path] = None
     peak_type: str = "auto"
     is_paired: Optional[bool] = None
-    parent_sample: Optional[str] = None
 
     def ensure_paths(self) -> None:
         if not self.bam.exists():
@@ -317,135 +316,6 @@ def load_samples(metadata_path: Path) -> List[SampleEntry]:
         entry.ensure_paths()
         entries.append(entry)
     return entries
-
-
-def _sequential_split_bam(
-    sample: SampleEntry, output_dir: Path, samtools_path: str, replicates: int
-) -> List[Path]:
-    if replicates < 1:
-        raise ValueError("replicates must be a positive integer")
-
-    ensure_directory(output_dir)
-
-    try:
-        total_reads = int(
-            subprocess.check_output(
-                [samtools_path, "view", "-c", str(sample.bam)], text=True
-            ).strip()
-        )
-    except subprocess.CalledProcessError as exc:  # pragma: no cover - external command
-        raise RuntimeError(f"Failed to count reads for {sample.bam}: {exc}") from exc
-    except ValueError as exc:
-        raise RuntimeError(
-            f"Non-numeric read count returned by samtools for {sample.bam}"
-        ) from exc
-
-    if total_reads <= 0:
-        raise ValueError(f"No alignments available in BAM {sample.bam}")
-
-    chunk_size = math.ceil(total_reads / replicates)
-    header_proc = subprocess.run(
-        [samtools_path, "view", "-H", str(sample.bam)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    header_lines = header_proc.stdout.splitlines(keepends=True)
-
-    procs: List[subprocess.Popen[str]] = []
-    outputs: List[Path] = []
-    for idx in range(replicates):
-        out_path = output_dir / f"{sample.sample}_pseudo{idx + 1}.bam"
-        proc = subprocess.Popen(
-            [samtools_path, "view", "-b", "-o", str(out_path), "-"],
-            stdin=subprocess.PIPE,
-            text=True,
-        )
-        procs.append(proc)
-        outputs.append(out_path)
-
-    stream_proc = subprocess.Popen(
-        [samtools_path, "view", str(sample.bam)], stdout=subprocess.PIPE, text=True
-    )
-
-    processed = 0
-    target_idx = 0
-    try:
-        for line in header_lines:
-            for proc in procs:
-                if proc.stdin:
-                    proc.stdin.write(line)
-
-        if stream_proc.stdout is None:  # pragma: no cover - defensive guard
-            raise RuntimeError("samtools stream missing stdout handle")
-
-        for line in stream_proc.stdout:
-            target_proc = procs[target_idx]
-            if target_proc.stdin:
-                target_proc.stdin.write(line)
-            processed += 1
-            if processed % chunk_size == 0 and target_idx < replicates - 1:
-                target_idx += 1
-    finally:
-        if stream_proc.stdout:
-            stream_proc.stdout.close()
-
-    stream_proc.wait()
-    for proc in procs:
-        if proc.stdin:
-            proc.stdin.close()
-    return_codes = [proc.wait() for proc in procs]
-
-    if stream_proc.returncode not in (0, None):
-        raise RuntimeError(f"samtools view failed while splitting {sample.bam}")
-    for idx, code in enumerate(return_codes):
-        if code != 0:
-            raise RuntimeError(
-                f"samtools view failed for pseudo-replicate {idx + 1} of {sample.bam}"
-            )
-
-    return outputs
-
-
-def generate_pseudo_replicates(
-    samples: Sequence[SampleEntry],
-    *,
-    output_root: Path,
-    samtools_path: str,
-    replicates: int = 3,
-) -> Tuple[List[SampleEntry], Dict[str, List[str]]]:
-    """Split each BAM sequentially into pseudo-replicates.
-
-    Returns the expanded sample list and a mapping from original samples to
-    their derived pseudo-replicate names.
-    """
-
-    ensure_directory(output_root)
-    expanded: List[SampleEntry] = []
-    mapping: Dict[str, List[str]] = {}
-
-    for sample in samples:
-        logging.info(
-            "Generating %d pseudo-replicates for %s", replicates, sample.sample
-        )
-        sample_out_dir = output_root / sample.sample
-        outputs = _sequential_split_bam(sample, sample_out_dir, samtools_path, replicates)
-        mapping[sample.sample] = []
-        for idx, path in enumerate(outputs, start=1):
-            name = f"{sample.sample}_pr{idx}"
-            mapping[sample.sample].append(name)
-            expanded.append(
-                SampleEntry(
-                    sample=name,
-                    condition=sample.condition,
-                    bam=path,
-                    peaks=sample.peaks,
-                    peak_type=sample.peak_type,
-                    parent_sample=sample.sample,
-                )
-            )
-
-    return expanded, mapping
 
 
 # ---------------------------------------------------------------------------
@@ -1194,36 +1064,7 @@ def run_pipeline(
         for sample in samples:
             sample.ensure_paths()
 
-    results_dir = ensure_directory(Path(args.output_dir))
-    pseudorep_count = 3
-
-    single_replicate_mode = getattr(args, "single_replicate_mode", "mars")
     conditions = pd.Series({s.sample: s.condition for s in samples})
-    replicates_per_condition = conditions.value_counts().min()
-
-    ensure_commands(["samtools"])
-    samtools_path = shutil.which("samtools")
-    if samtools_path is None:  # pragma: no cover - defensive (ensure_commands guards)
-        raise RuntimeError("samtools not found on PATH after validation")
-
-    pseudorep_mapping: Dict[str, List[str]] = {}
-    if replicates_per_condition < 2 and single_replicate_mode == "pseudo":
-        if conditions.nunique() != 2:
-            raise ValueError(
-                "Pseudo-replicate mode requires exactly two experimental conditions"
-            )
-
-        pseudo_root = results_dir / "pseudoreplicates"
-        samples, pseudorep_mapping = generate_pseudo_replicates(
-            samples,
-            output_root=pseudo_root,
-            samtools_path=samtools_path,
-            replicates=pseudorep_count,
-        )
-        for sample in samples:
-            sample.ensure_paths()
-        conditions = pd.Series({s.sample: s.condition for s in samples})
-        replicates_per_condition = conditions.value_counts().min()
 
     consensus_arg = getattr(args, "consensus_peaks", None)
     consensus_path = Path(consensus_arg) if consensus_arg else None
@@ -1234,10 +1075,16 @@ def run_pipeline(
         required_cmds.append(get_macs_command())
     ensure_commands(required_cmds)
 
+    samtools_path = shutil.which("samtools")
+    if samtools_path is None:  # pragma: no cover - defensive (ensure_commands guards)
+        raise RuntimeError("samtools not found on PATH after validation")
+
     for sample in samples:
         sample.is_paired = detect_paired_end_bam(sample.bam, samtools_path, args.threads)
 
     library_sizes = compute_library_sizes(samples, samtools_path, args.threads)
+
+    results_dir = ensure_directory(Path(args.output_dir))
 
     prior_manifest_value = getattr(args, "prior_manifest", None)
     manifest_data: Dict[str, object] = {}
@@ -1493,18 +1340,10 @@ def run_pipeline(
                 "peaks": str(sample.peaks) if sample.peaks is not None else None,
                 "peak_type": sample.peak_type,
                 "library_size": float(library_sizes.loc[sample.sample]),
-                "parent_sample": sample.parent_sample,
             }
         )
 
     args_dict = {key: value for key, value in vars(args).items() if key != "samples"}
-    pseudorep_metadata: Optional[Dict[str, object]] = None
-    if pseudorep_mapping:
-        pseudorep_metadata = {
-            "mode": single_replicate_mode,
-            "replicates_per_sample": pseudorep_count,
-            "mapping": pseudorep_mapping,
-        }
     metadata = {
         "timestamp": datetime.utcnow().isoformat(),
         "args": args_dict,
@@ -1519,7 +1358,6 @@ def run_pipeline(
         "library_sizes": {name: float(value) for name, value in library_sizes.to_dict().items()},
         "consensus": consensus_metadata,
         "prior": prior_registry.metadata_entry(),
-        "pseudoreplicates": pseudorep_metadata,
     }
     save_metadata(metadata, results_dir / "metadata.json")
 
@@ -1629,16 +1467,6 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=16,
         help="Threads for multiBamSummary (--numberOfProcessors)",
-    )
-    parser.add_argument(
-        "--single-replicate-mode",
-        choices=["mars", "pseudo"],
-        default="mars",
-        help=(
-            "Strategy for single-replicate (1v1) designs: 'mars' keeps the"
-            " existing MARS workflow while 'pseudo' splits each BAM into"
-            " sequential pseudo-replicates"
-        ),
     )
     parser.add_argument("--gtf", help="Optional GTF file for annotation")
     parser.add_argument("--enrichr", action="store_true", help="Run Enrichr GO Biological Process analysis")
