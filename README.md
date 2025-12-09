@@ -219,12 +219,32 @@ Generates results under `example/results/`, including `consensus_peaks.bed` that
 ```bash
 bash example/run_example_1v1.sh
 ```
-Exercises the MARS branch via `metadata_1v1.tsv`, producing outputs in `example/results_1v1/`. The wrapped CLI call is:
+By default the script runs the MARS workflow on `metadata_1v1.tsv`, producing outputs in `example/results_1v1/`. The wrapped CLI call is:
 
 ```bash
 ./peakforge tsvmode example/data/metadata_1v1.tsv \
   --output-dir example/results_1v1 \
   --peak-dir example/results_1v1/peaks \
+  --peak-type narrow \
+  --peak-extension 250 \
+  --single-replicate-mode mars \
+  --min-overlap 1 \
+  --macs2-genome hs \
+  --threads 16
+```
+
+When working with single replicates you can switch to pseudo-replicate mode, which sequentially splits each BAM into three pseudo-replicates (1 BAM → 3 BAMs) before running DESeq2:
+
+```bash
+MODE=pseudo bash example/run_example_1v1.sh
+```
+or directly via the CLI:
+
+```bash
+./peakforge tsvmode example/data/metadata_1v1.tsv \
+  --output-dir example/results_1v1_pseudo \
+  --peak-dir example/results_1v1_pseudo/peaks \
+  --single-replicate-mode pseudo \
   --peak-type narrow \
   --peak-extension 250 \
   --min-overlap 1 \
