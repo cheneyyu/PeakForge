@@ -179,6 +179,18 @@ def ensure_directory(path: Path) -> Path:
     return path
 
 
+def _maybe_threaded_cmd(cmd: List[str], threads: int) -> List[str]:
+    if threads <= 1:
+        return cmd
+
+    threaded = list(cmd)
+    # Insert thread flag immediately after the subcommand (e.g. 'view').
+    if len(threaded) >= 2:
+        threaded.insert(2, "-@")
+        threaded.insert(3, str(threads))
+    return threaded
+
+
 def _bam_index_candidates(bam: Path) -> List[Path]:
     candidates: List[Path] = []
     candidates.append(Path(f"{bam}.bai"))
@@ -320,7 +332,11 @@ def load_samples(metadata_path: Path) -> List[SampleEntry]:
 
 
 def _sequential_split_bam(
-    sample: SampleEntry, output_dir: Path, samtools_path: str, replicates: int
+    sample: SampleEntry,
+    output_dir: Path,
+    samtools_path: str,
+    replicates: int,
+    threads: int = 1,
 ) -> List[Path]:
     if replicates < 1:
         raise ValueError("replicates must be a positive integer")
@@ -330,7 +346,8 @@ def _sequential_split_bam(
     try:
         total_reads = int(
             subprocess.check_output(
-                [samtools_path, "view", "-c", str(sample.bam)], text=True
+                _maybe_threaded_cmd([samtools_path, "view", "-c", str(sample.bam)], threads),
+                text=True,
             ).strip()
         )
     except subprocess.CalledProcessError as exc:  # pragma: no cover - external command
@@ -345,7 +362,7 @@ def _sequential_split_bam(
 
     chunk_size = math.ceil(total_reads / replicates)
     header_proc = subprocess.run(
-        [samtools_path, "view", "-H", str(sample.bam)],
+        _maybe_threaded_cmd([samtools_path, "view", "-H", str(sample.bam)], threads),
         capture_output=True,
         text=True,
         check=True,
@@ -357,7 +374,9 @@ def _sequential_split_bam(
     for idx in range(replicates):
         out_path = output_dir / f"{sample.sample}_pseudo{idx + 1}.bam"
         proc = subprocess.Popen(
-            [samtools_path, "view", "-b", "-o", str(out_path), "-"],
+            _maybe_threaded_cmd(
+                [samtools_path, "view", "-b", "-o", str(out_path), "-"], threads
+            ),
             stdin=subprocess.PIPE,
             text=True,
         )
@@ -365,7 +384,9 @@ def _sequential_split_bam(
         outputs.append(out_path)
 
     stream_proc = subprocess.Popen(
-        [samtools_path, "view", str(sample.bam)], stdout=subprocess.PIPE, text=True
+        _maybe_threaded_cmd([samtools_path, "view", str(sample.bam)], threads),
+        stdout=subprocess.PIPE,
+        text=True,
     )
 
     processed = 0
@@ -412,6 +433,7 @@ def generate_pseudo_replicates(
     *,
     output_root: Path,
     samtools_path: str,
+    threads: int = 1,
     replicates: int = 3,
 ) -> Tuple[List[SampleEntry], Dict[str, List[str]]]:
     """Split each BAM sequentially into pseudo-replicates.
@@ -429,7 +451,13 @@ def generate_pseudo_replicates(
             "Generating %d pseudo-replicates for %s", replicates, sample.sample
         )
         sample_out_dir = output_root / sample.sample
-        outputs = _sequential_split_bam(sample, sample_out_dir, samtools_path, replicates)
+        outputs = _sequential_split_bam(
+            sample,
+            sample_out_dir,
+            samtools_path,
+            replicates,
+            threads,
+        )
         mapping[sample.sample] = []
         for idx, path in enumerate(outputs, start=1):
             name = f"{sample.sample}_pr{idx}"
@@ -1218,6 +1246,7 @@ def run_pipeline(
             samples,
             output_root=pseudo_root,
             samtools_path=samtools_path,
+            threads=args.threads,
             replicates=pseudorep_count,
         )
         for sample in samples:
