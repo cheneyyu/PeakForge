@@ -635,6 +635,53 @@ def benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
     return pd.Series(adjusted, index=pvalues.index)
 
 
+def apply_weighted_bh(p_values, weights, alpha=0.05):
+    """
+    p_values: numpy array of raw p-values
+    weights: numpy array of non-negative prior weights
+             (they will be normalized to mean 1 inside the function)
+    Returns:
+        p_weighted: weighted p-values (p / w)
+        q_weighted: BH-adjusted q-values on p_weighted
+        significant: boolean array of discoveries at FDR alpha
+    """
+
+    pvals = np.asarray(p_values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+
+    if pvals.shape != w.shape:
+        raise ValueError("p_values and weights must have the same shape")
+
+    if pvals.size == 0:
+        return pvals, pvals, np.asarray([], dtype=bool)
+
+    pvals = np.clip(np.nan_to_num(pvals, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    w = np.clip(np.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
+
+    mean_weight = w.mean()
+    if mean_weight <= 0:
+        w_norm = np.ones_like(w)
+    else:
+        w_norm = w / mean_weight
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p_weighted = np.divide(pvals, w_norm, out=np.ones_like(pvals), where=w_norm != 0)
+    p_weighted = np.clip(p_weighted, 0.0, 1.0)
+
+    order = np.argsort(p_weighted)
+    ranks = np.arange(1, p_weighted.size + 1, dtype=float)
+    adjusted_sorted = p_weighted[order] * p_weighted.size / ranks
+    adjusted_sorted = np.minimum.accumulate(adjusted_sorted[::-1])[::-1]
+
+    q_weighted = np.empty_like(adjusted_sorted)
+    q_weighted[order] = adjusted_sorted
+    q_weighted = np.clip(q_weighted, 0.0, 1.0)
+
+    significant = q_weighted <= alpha
+
+    return p_weighted, q_weighted, significant
+
+
 def pydeseq2_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFrame:
     if DeseqDataSet is None or DeseqStats is None:
         raise ImportError("pydeseq2 is required for the DESeq2 workflow but is not installed")
@@ -1288,8 +1335,11 @@ def run_pipeline(
         if "lfcSE" in diff_res.columns:
             prior_adjusted["lfcSE_prior"] = diff_res["lfcSE"] * penalty_factor
         if "pvalue" in diff_res.columns:
-            prior_adjusted["pvalue_prior"] = np.minimum(1.0, diff_res["pvalue"] * penalty_factor)
-            prior_adjusted["padj_prior"] = benjamini_hochberg(prior_adjusted["pvalue_prior"]).fillna(1.0)
+            p_weighted, q_weighted, _ = apply_weighted_bh(
+                diff_res["pvalue"].to_numpy(), overlap_factor.to_numpy(), alpha=0.05
+            )
+            prior_adjusted["pvalue_prior"] = p_weighted
+            prior_adjusted["padj_prior"] = q_weighted
         prior_adjusted_path = results_dir / "differential_results_prior.tsv"
         prior_adjusted.to_csv(prior_adjusted_path, sep="\t")
 
