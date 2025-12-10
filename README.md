@@ -25,166 +25,6 @@ PeakForge is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CU
 - Supports contrasts with multiple replicates per condition as well as 1 vs 1 comparisons.
 - Emits `differential_results.tsv` plus optional annotations and enrichment tables.
 
-### Optional prior integration
-PeakForge can blend public resources into the analysis to stabilise peak statistics or down-weight outliers that deviate from
-well-characterised regulatory regions.  The `PriorRegistry` orchestrates this behaviour and is shared by both the main pipeline
-and the `peakforge peakshape` subcommand.
-
-#### Building priors in practice
-Many users asked how to *produce* and *ship* priors rather than only consume them.  A pragmatic workflow is:
-
-1. **Curate a BED catalogue** – Start from high-quality replicates or public consortia data (ENCODE, BLUEPRINT, etc.).  Merge
-   overlapping intervals (for example with `bedtools merge -d 50`) so the catalogue reflects the regulatory territory you
-   trust.  This file becomes the `--prior-bed` input.
-2. **Summarise intensity with bigWigs** – Generate signal tracks that reflect the typical coverage over those regions.  A common
-   pattern is `bamCoverage --normalizeUsing RPGC ... --outFileName reference.bw` followed by `multiBigwigSummary BED-file --bwfiles reference.bw --outRawCounts reference_prior.tsv --outFileName /tmp/ignore.npz`.  The resulting bigWig is supplied through
-   `--prior-bigwig` so PeakForge can compute expected read densities per prior interval.
-3. **Capture shape statistics** – Run `peakforge peakshape` (or `python peak_shape.py`) on the same training samples to export
-   per-peak metrics.  The command `peakforge peakshape --peaks curated.bed --bam reference.bam --prior-shape stats.tsv` will emit
-   a TSV that records distributions for width, summit sharpness, shoulder ratios, etc.  These statistics inform z-score scaling
-   and novelty penalties when passed to `--prior-shape` / `--prior-stats`.
-4. **Describe everything with a manifest** – Place the BED, bigWig, and stats file in a directory alongside a `prior_manifest.json`:
-
-   ```json
-   {
-     "prior_bed": "prior_catalogue.bed",
-     "prior_bigwig": "reference.bw",
-     "prior_stats": "stats.tsv",
-     "prior_weight": 0.4
-   }
-   ```
-
-   Shipping this folder with your project makes it trivial for collaborators to reproduce the same prior-aware analysis via
-   `--prior-manifest`.
-
-The `example/run_with_prior.sh` script bootstraps a miniature manifest that demonstrates the whole workflow end to end.
-
-#### Supported prior artefacts
-- **BED intervals** (`--prior-bed` or manifest `prior_bed`): define a catalogue of curated peaks.  The loader normalises the
-  coordinates, converts them into a `PyRanges` object, and computes width distributions alongside per-peak overlap counts.
-- **bigWig tracks** (`--prior-bigwig` or manifest `prior_bigwig`): summarise signal intensity across the prior intervals using
-  `pyBigWig`.  The median and standard deviation of these summaries are recorded when available.
-- **Shape statistics** (`--prior-shape` / `--prior-stats` or manifest `prior_stats`): provide distributional expectations for
-  per-peak metrics such as summit sharpness or shoulder ratios.  JSON, TSV, CSV, and wide-format tables are supported.
-- **Manifest** (`--prior-manifest`): centralises the above paths and the default mixing `prior_weight`.  Relative paths resolve
-  relative to the manifest location, making it easy to ship priors alongside a project.
-
-------------------------------------------------------------
-Optional Prior Inputs
-------------------------------------------------------------
-
-You may provide one or more prior datasets to guide peak weighting and ranking.
-
-1) Regulatory-region priors (BED)
-   - A BED file with curated regulatory intervals, such as:
-     - Known ChIP-seq / CUT&Tag peaks for the same TF or histone mark
-     - ATAC-seq / DNase accessible regions
-     - Enhancer catalogs (e.g. ENCODE, Roadmap, other public resources)
-
-2) Signal-intensity priors (bigWig)
-   - A bigWig file representing typical signal levels in:
-     - The same or closely related cell type
-     - A similar assay (CUT&Tag / ChIP-seq / ATAC / DNase)
-   - Common choices:
-     - High-quality reference tracks
-     - Pooled controls or deeply sequenced replicates
-     - Public signal tracks for the same histone modification or TF
-
-3) Shape-geometry priors (peak-shape statistics)
-   - A TSV/CSV/JSON file with peak-shape metrics, for example:
-     - Sharpness
-     - Symmetry
-     - Kurtosis
-     - Shoulder strength
-     - Width-related metrics
-   - These can be derived from:
-     - Your own high-quality replicates
-     - Public datasets from the same assay type (e.g. CUT&Tag vs histone ChIP)
-
-------------------------------------------------------------
-What Data Makes a Good Prior?
-------------------------------------------------------------
-
-Priors should be chosen based on biological and technical relevance, not just file format.
-
-Regulatory-region priors (BED):
-- Recommended:
-  - Peaks for the same TF or histone mark in the same cell line or closely related lineage
-  - Accessible-region catalogs (ATAC/DNase) in the same or similar cell type
-  - High-confidence enhancer or regulatory region databases
-- Avoid:
-  - Unrelated tissues or very different cell types
-  - Peak sets with very poor quality or mismatched genome builds
-
-Signal-intensity priors (bigWig):
-- Recommended:
-  - High-quality CUT&Tag/ChIP/ATAC/DNase signal tracks for the same or similar cell type
-  - Pooled controls or representative high-coverage tracks from your own study
-- Avoid:
-  - Tracks from unrelated tissues or assays that produce incompatible signal distributions
-
-Shape-geometry priors (statistics):
-- Recommended:
-  - Peak-shape metrics computed from your strongest replicates
-  - Public datasets from the same assay type and similar peak morphology
-- Avoid:
-  - Shape priors from incompatible assay types (e.g. very broad marks vs very sharp TF binding)
-
-General guideline:
-- Use priors that are:
-  - Biologically plausible for the cell type or lineage
-  - Assay-consistent with your experiment
-  - Condition-agnostic (not encoding treatment-specific differences)
-
-#### How priors influence scoring
-1. Peak widths from the prior BED are used to compute a reference mean and standard deviation.  Each observed peak receives a
-   z-score (`WidthZ`).
-2. Peaks that overlap at least one prior interval are treated as familiar and inherit the configured `prior_weight` directly.
-   Non-overlapping peaks apply a *novelty penalty* that scales with the width z-score, reducing (but not eliminating) the weight
-   assigned to novel events.
-3. When shape statistics or bigWig intensities are provided, the registry mixes observed scores with the prior expectations,
-   yielding adjusted metrics via `adjust_scores`.  This ensures that poorly covered peaks can still be ranked sensibly.
-4. The per-peak weights are exposed through `get_consensus_weights`, allowing downstream logic to incorporate them when
-   prioritising differential hits or plotting ranked lists.
-
-#### Why priors matter for 1 vs 1 contrasts
-Single replicate contrasts (1 treatment vs 1 control) lean on the MARS (MA-plot-based Random Sampling) test, which has limited power to distinguish noise from signal without additional information.  Priors counteract this by providing reference behaviour for well-characterised loci:
-
-- **Overlap-driven shrinkage** – When an observed peak intersects the prior catalogue, its log fold-change is retained.  Novel
-  peaks have their `log2FC` (and, when available, `log2FC_shrunk`) multiplied by `1 - w · (1 - overlap_fraction)`, where `w` is
-  `--prior-weight`.  This tempers aggressive fold-changes from noisy loci while preserving validated regions.
-- **Penalty-aware p-values** – Novel peaks also inherit a `penalty_factor = 1 + w · (1 - overlap_fraction)` that inflates
-  p-values and standard errors.  When the prior weight is non-zero this makes the MARS output less overconfident in unexplored
-  regions, which is especially helpful with only two libraries.
-- **Shape sanity checks** – Feeding shape priors into `peakforge peakshape` highlights peaks with atypical summit profiles
-  (`PriorShapeCategory`), flagging candidates that may deserve manual inspection before being called differential hits.
-
-When tuning for 1v1 work:
-
-1. Start with a moderate `--prior-weight` such as `0.3–0.5`.  Inspect `differential_results_prior.tsv` to ensure familiar loci
-   remain high-confidence while novel peaks are merely down-weighted rather than discarded.
-2. Review the overlap tables (`peaks_prior_overlap.tsv`, `peaks_prior_novel.tsv`) to gauge how much of your catalogue is
-   supported by the data.
-3. Use the generated `prior_vs_observed.png` plot to confirm that observed signal distributions roughly align with the priors;
-   large discrepancies indicate that the weight should be reduced or the catalogue refreshed.
-
-Following these steps gives the sparse 1 vs 1 branch enough context to stabilise fold-change estimates without hiding truly novel
-biology.
-
-#### Outputs and reporting
-- For every sample PeakForge records overlap tables (`peaks_prior_all.tsv`, `peaks_prior_overlap.tsv`, `peaks_prior_novel.tsv`).
-- These tables are tab-delimited with `Chromosome`, `Start`, `End`, and `Sample` columns from the original peaks plus the
-  prior-derived metrics:
-  - `Width` and `WidthZ` capture the raw interval width and its z-score relative to the prior catalogue.
-  - `PriorOverlap` and `OverlapCount` indicate whether the peak intersects the prior catalogue and how many intervals were
-    hit.
-  - `PriorWeight` shows the effective weight after novelty penalties; `NoveltyPenalty` reflects how much the weight was reduced
-    for non-overlapping peaks.
-- Consensus peaks inherit the same statistics and are saved with effective weights plus overlap counts.
-- Summary JSON files capture aggregate overlap fractions, mean weights, and provenance of prior artefacts for reproducibility.
-- Optional distribution JSON (`prior_distributions.json`) and comparative density plots (`prior_vs_observed.png`) can be
-  produced for audit trails or supplementary figures.
-
 ### Outputs and visualisation
 - Volcano plots, MA plots, sample correlation heatmaps, and top-peak heatmaps summarise differential results.
 - JSON metadata captures run configuration, library sizes, and provenance of priors for reproducibility.
@@ -196,6 +36,7 @@ biology.
 3. Quantify read counts per consensus interval with deepTools and estimate library sizes via `samtools idxstats`.
 4. Automatically select PyDESeq2 (replicates present) or the MARS (MA-plot-based Random Sampling) test (no replicates) for differential analysis.
 5. Generate plots, summary tables, and optional annotations/enrichment reports under the output directory.
+
 
 ## Installation
 
@@ -363,6 +204,16 @@ Any completed PeakForge analysis writes `consensus_peaks.bed` inside the output 
 Run `./peakforge --help` (or `python chipdiff.py --help`) to inspect CLI options including peak-calling parameters, threading controls, annotation, enrichment, and prior configuration.
 
 ---
+
+## Optional priors (current behaviour)
+
+Priors are supported but intentionally conservative in the current release:
+
+- **What gets loaded** – You can pass a BED (`--prior-bed`), bigWig (`--prior-bigwig`), and shape statistics table (`--prior-stats`), either directly or through `--prior-manifest`. The registry records width distributions, optional intensity summaries, and shape statistics for later plotting.
+- **How they are applied** – The BED overlap determines `PriorOverlap` and a per-peak `PriorWeight` (with a novelty penalty for unusually wide novel peaks). During differential testing, those overlap-aware weights are blended with any per-peak `IntZ` (intensity z) and `ShapeZ` (shape z) columns to form a unified score; the score is standardised, exponentiated, normalised to mean 1, and fed into the weighted Benjamini–Hochberg procedure (`prior_weight`, `p_weighted`, `q_weighted`). Log fold-changes and raw p-values are not directly altered.
+- **Why use them** – Overlap with a trusted catalogue down-weights p-values for familiar loci, while high-magnitude intensity/shape deviations (if supplied) push weights back toward 1, reducing over-confidence in discordant peaks. QC artefacts are still summarised (distributions, KDE plots, overlap tables), but the priors also influence multiple-testing correction through the weighting scheme rather than serving purely as quality checks.
+
+To ship a reusable prior bundle, place the files next to a `prior_manifest.json` containing the keys `prior_bed`, `prior_bigwig`, `prior_stats`, and `prior_weight`; `example/run_with_prior.sh` demonstrates this layout end-to-end.
 
 ## References
 - [PyDESeq2][pydeseq2]
