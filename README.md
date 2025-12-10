@@ -69,6 +69,73 @@ The `example/run_with_prior.sh` script bootstraps a miniature manifest that demo
 - **Manifest** (`--prior-manifest`): centralises the above paths and the default mixing `prior_weight`.  Relative paths resolve
   relative to the manifest location, making it easy to ship priors alongside a project.
 
+------------------------------------------------------------
+Optional Prior Inputs
+------------------------------------------------------------
+
+You may provide one or more prior datasets to guide peak weighting and ranking.
+
+1) Regulatory-region priors (BED)
+   - A BED file with curated regulatory intervals, such as:
+     - Known ChIP-seq / CUT&Tag peaks for the same TF or histone mark
+     - ATAC-seq / DNase accessible regions
+     - Enhancer catalogs (e.g. ENCODE, Roadmap, other public resources)
+
+2) Signal-intensity priors (bigWig)
+   - A bigWig file representing typical signal levels in:
+     - The same or closely related cell type
+     - A similar assay (CUT&Tag / ChIP-seq / ATAC / DNase)
+   - Common choices:
+     - High-quality reference tracks
+     - Pooled controls or deeply sequenced replicates
+     - Public signal tracks for the same histone modification or TF
+
+3) Shape-geometry priors (peak-shape statistics)
+   - A TSV/CSV/JSON file with peak-shape metrics, for example:
+     - Sharpness
+     - Symmetry
+     - Kurtosis
+     - Shoulder strength
+     - Width-related metrics
+   - These can be derived from:
+     - Your own high-quality replicates
+     - Public datasets from the same assay type (e.g. CUT&Tag vs histone ChIP)
+
+------------------------------------------------------------
+What Data Makes a Good Prior?
+------------------------------------------------------------
+
+Priors should be chosen based on biological and technical relevance, not just file format.
+
+Regulatory-region priors (BED):
+- Recommended:
+  - Peaks for the same TF or histone mark in the same cell line or closely related lineage
+  - Accessible-region catalogs (ATAC/DNase) in the same or similar cell type
+  - High-confidence enhancer or regulatory region databases
+- Avoid:
+  - Unrelated tissues or very different cell types
+  - Peak sets with very poor quality or mismatched genome builds
+
+Signal-intensity priors (bigWig):
+- Recommended:
+  - High-quality CUT&Tag/ChIP/ATAC/DNase signal tracks for the same or similar cell type
+  - Pooled controls or representative high-coverage tracks from your own study
+- Avoid:
+  - Tracks from unrelated tissues or assays that produce incompatible signal distributions
+
+Shape-geometry priors (statistics):
+- Recommended:
+  - Peak-shape metrics computed from your strongest replicates
+  - Public datasets from the same assay type and similar peak morphology
+- Avoid:
+  - Shape priors from incompatible assay types (e.g. very broad marks vs very sharp TF binding)
+
+General guideline:
+- Use priors that are:
+  - Biologically plausible for the cell type or lineage
+  - Assay-consistent with your experiment
+  - Condition-agnostic (not encoding treatment-specific differences)
+
 #### How priors influence scoring
 1. Peak widths from the prior BED are used to compute a reference mean and standard deviation.  Each observed peak receives a
    z-score (`WidthZ`).
@@ -106,6 +173,13 @@ biology.
 
 #### Outputs and reporting
 - For every sample PeakForge records overlap tables (`peaks_prior_all.tsv`, `peaks_prior_overlap.tsv`, `peaks_prior_novel.tsv`).
+- These tables are tab-delimited with `Chromosome`, `Start`, `End`, and `Sample` columns from the original peaks plus the
+  prior-derived metrics:
+  - `Width` and `WidthZ` capture the raw interval width and its z-score relative to the prior catalogue.
+  - `PriorOverlap` and `OverlapCount` indicate whether the peak intersects the prior catalogue and how many intervals were
+    hit.
+  - `PriorWeight` shows the effective weight after novelty penalties; `NoveltyPenalty` reflects how much the weight was reduced
+    for non-overlapping peaks.
 - Consensus peaks inherit the same statistics and are saved with effective weights plus overlap counts.
 - Summary JSON files capture aggregate overlap fractions, mean weights, and provenance of prior artefacts for reproducibility.
 - Optional distribution JSON (`prior_distributions.json`) and comparative density plots (`prior_vs_observed.png`) can be
