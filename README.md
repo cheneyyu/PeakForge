@@ -1,6 +1,10 @@
 # PeakForge
 
-PeakForge is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CUT&Tag, and ChIP-seq differential analysis. It ingests BAM files or pre-called MACS2 peaks, builds consensus intervals, quantifies coverage, and performs replicate-aware or no-replicate differential testing. Single-sample contrasts remain supported through an implementation of the MARS (MA-plot-based Random Sampling) test so motif and regulon shifts remain discoverable even when only rich individual libraries are available.
+PeakForge is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CUT&Tag, and ChIP-seq differential
+analysis. It ingests BAM files or pre-called MACS2 peaks, builds consensus intervals, quantifies coverage, and performs
+replicate-aware or no-replicate differential testing. Single-sample contrasts remain supported through an implementation
+of the MARS (MA-plot-based Random Sampling) test so motif and regulon shifts remain discoverable even when only rich
+individual libraries are available.
 
 ---
 
@@ -37,7 +41,6 @@ PeakForge is a Python-native, DiffBind-style toolkit for end-to-end ATAC-seq, CU
 4. Automatically select PyDESeq2 (replicates present) or the MARS (MA-plot-based Random Sampling) test (no replicates) for differential analysis.
 5. Generate plots, summary tables, and optional annotations/enrichment reports under the output directory.
 
-
 ## Installation
 
 ### Requirements
@@ -60,7 +63,8 @@ After installing the dependencies, confirm that the CLI is reachable and that op
 which macs2 macs3 samtools multiBamSummary
 ```
 
-If any of the external tools are missing you can re-run the `conda install` command or add them to an existing environment.
+If any of the external tools are missing you can re-run the `conda install` command or add them to an existing
+environment.
 
 ---
 
@@ -72,23 +76,24 @@ If any of the external tools are missing you can re-run the `conda install` comm
 
 ### Sample sheet format
 
-The sheet can be tab- or comma-delimited and must include `sample`, `condition`, and `bam`. Optional columns let you supply pre-called peaks as MACS2 `narrowPeak` or `broadPeak` files.
+The sheet can be tab- or comma-delimited and must include `sample`, `condition`, and `bam`. Optional columns let you
+supply pre-called peaks as MACS2 `narrowPeak` or `broadPeak` files.
 
-#### 1 vs 1 
+#### 1 vs 1
 
-| sample   | condition | bam                         | peaks                                   | peak_type |
-|----------|-----------|-----------------------------|-----------------------------------------|-----------|
-| K562_rep1 | treated   | example/data/K562_rep1.bam  | example/results/narrow/K562_rep1_peaks.narrowPeak | narrow    |
-| HepG2_rep1 | control | example/data/HepG2_rep1.bam | example/results/narrow/HepG2_rep1_peaks.narrowPeak | narrow    |
+| sample     | condition | bam                         | peaks                                               | peak_type |
+|------------|-----------|-----------------------------|-------------------------------------|-----------|
+| K562_rep1  | treated   | example/data/K562_rep1.bam  | example/results/narrow/K562_rep1_peaks.narrowPeak   | narrow    |
+| HepG2_rep1 | control   | example/data/HepG2_rep1.bam | example/results/narrow/HepG2_rep1_peaks.narrowPeak  | narrow    |
 
-#### 2 vs 2 
+#### 2 vs 2
 
-| sample     | condition | bam                         | peaks                                        | peak_type |
-|------------|-----------|-----------------------------|----------------------------------------------|-----------|
-| K562_rep1  | K562      | example/data/K562_rep1.bam  | example/results/broad/K562_rep1_peaks.broadPeak | broad     |
-| K562_rep2  | K562      | example/data/K562_rep2.bam  | example/results/broad/K562_rep2_peaks.broadPeak | broad     |
-| HepG2_rep1 | HepG2     | example/data/HepG2_rep1.bam | example/results/broad/HepG2_rep1_peaks.broadPeak | broad     |
-| HepG2_rep2 | HepG2     | example/data/HepG2_rep2.bam | example/results/broad/HepG2_rep2_peaks.broadPeak | broad     |
+| sample     | condition | bam                         | peaks                                               | peak_type |
+|------------|-----------|-----------------------------|-------------------------------------|-----------|
+| K562_rep1  | K562      | example/data/K562_rep1.bam  | example/results/broad/K562_rep1_peaks.broadPeak     | broad     |
+| K562_rep2  | K562      | example/data/K562_rep2.bam  | example/results/broad/K562_rep2_peaks.broadPeak     | broad     |
+| HepG2_rep1 | HepG2     | example/data/HepG2_rep1.bam | example/results/broad/HepG2_rep1_peaks.broadPeak    | broad     |
+| HepG2_rep2 | HepG2     | example/data/HepG2_rep2.bam | example/results/broad/HepG2_rep2_peaks.broadPeak    | broad     |
 
 ### Example command
 ```bash
@@ -102,10 +107,13 @@ The sheet can be tab- or comma-delimited and must include `sample`, `condition`,
   --gtf annotations.gtf \
   --enrichr
 ```
-This run performs peak calling (if necessary), constructs consensus intervals, quantifies counts, executes the appropriate differential workflow, annotates peaks, and produces summary plots.
-`--peak-type` controls whether MACS2 is invoked in narrow- or broad-peak mode when peaks are missing; narrow peaks are expanded symmetrically by `--peak-extension` (default 250 bp) to build the consensus, while broad peaks use their full width without extra padding. Paired-end BAMs are detected automatically and passed to MACS2 with `BAMPE` format.
-If you supply `narrowPeak` or `broadPeak` files in the sample sheet, PeakForge infers the mode from the extension and you can omit `--peak-type` entirely.
-`--threads` applies to deepTools counting and to any `samtools index` calls needed to compute library sizes.
+This run performs peak calling (if necessary), constructs consensus intervals, quantifies counts, executes the
+appropriate differential workflow, annotates peaks, and produces summary plots. `--peak-type` controls whether MACS2 is
+invoked in narrow- or broad-peak mode when peaks are missing; narrow peaks are expanded symmetrically by
+`--peak-extension` (default 250 bp) to build the consensus, while broad peaks use their full width without extra
+padding. Paired-end BAMs are detected automatically and passed to MACS2 with `BAMPE` format. If you supply `narrowPeak`
+or `broadPeak` files in the sample sheet, PeakForge infers the mode from the extension and you can omit `--peak-type`
+entirely. `--threads` applies to deepTools counting and to any `samtools index` calls needed to compute library sizes.
 
 ---
 
@@ -117,7 +125,8 @@ The `example/` directory orchestrates a matched ENCODE MYC ChIP-seq dataset (hg3
 ```bash
 bash example/run_pipeline.sh
 ```
-Generates results under `example/results/`, including `consensus_peaks.bed` that can be reused with `--consensus-peaks` in later runs. Internally the script executes the following PeakForge command (with `THREADS` defaulting to 16):
+Generates results under `example/results/`, including `consensus_peaks.bed` that can be reused with `--consensus-peaks`
+in later runs. Internally the script executes the following PeakForge command (with `THREADS` defaulting to 16):
 
 ```bash
 ./peakforge tsvmode example/data/metadata.tsv \
@@ -158,14 +167,17 @@ bash example/run_example2.sh \
   --b-peaks example/results/2v2/peaks/HepG2_rep1_peaks.narrowPeak example/results/2v2/peaks/HepG2_rep2_peaks.narrowPeak \
   --consensus-peaks example/results/2v2/consensus_peaks.bed
 ```
-Skips MACS2 when peaks are provided and reuses consensus intervals for consistent comparisons.
-The helper ultimately invokes `python chipdiff.py runmode` with the supplied arguments plus `--peak-type narrow --peak-extension 250 --min-overlap 2 --macs2-genome hs --threads 16`, so you can copy/paste the expanded command if you prefer to run PeakForge directly.
+Skips MACS2 when peaks are provided and reuses consensus intervals for consistent comparisons. The helper ultimately
+invokes `python chipdiff.py runmode` with the supplied arguments plus `--peak-type narrow --peak-extension 250
+--min-overlap 2 --macs2-genome hs --threads 16`, so you can copy/paste the expanded command if you prefer to run
+PeakForge directly.
 
 ### Prior-aware demo
 ```bash
 bash example/run_with_prior.sh
 ```
-Bootstraps priors, runs `tsvmode` with `--prior-manifest`, and performs peak-shape profiling with `--prior-shape`. The manifest contains `prior_bed`, `prior_stats`, and `prior_weight` entries; the script then calls:
+Bootstraps priors, runs `tsvmode` with `--prior-manifest`, and performs peak-shape profiling with `--prior-shape`. The
+manifest contains `prior_bed`, `prior_stats`, and `prior_weight` entries; the script then calls:
 
 ```bash
 ./peakforge tsvmode example/data/metadata_1v1.tsv \
@@ -188,7 +200,9 @@ Bootstraps priors, runs `tsvmode` with `--prior-manifest`, and performs peak-sha
 ---
 
 ## Reusing consensus peaks
-Any completed PeakForge analysis writes `consensus_peaks.bed` inside the output directory. Passing that file to either `tsvmode` or `runmode` through `--consensus-peaks` preserves genomic intervals across follow-up contrasts, keeping fold-change estimates directly comparable.
+Any completed PeakForge analysis writes `consensus_peaks.bed` inside the output directory. Passing that file to either
+`tsvmode` or `runmode` through `--consensus-peaks` preserves genomic intervals across follow-up contrasts, keeping
+fold-change estimates directly comparable.
 
 ---
 
@@ -201,7 +215,8 @@ Any completed PeakForge analysis writes `consensus_peaks.bed` inside the output 
 ---
 
 ## Command reference
-Run `./peakforge --help` (or `python chipdiff.py --help`) to inspect CLI options including peak-calling parameters, threading controls, annotation, enrichment, and prior configuration.
+Run `./peakforge --help` (or `python chipdiff.py --help`) to inspect CLI options including peak-calling parameters,
+threading controls, annotation, enrichment, and prior configuration.
 
 ---
 
@@ -209,11 +224,25 @@ Run `./peakforge --help` (or `python chipdiff.py --help`) to inspect CLI options
 
 Priors are supported but intentionally conservative in the current release:
 
-- **What gets loaded** – You can pass a BED (`--prior-bed`), bigWig (`--prior-bigwig`), and shape statistics table (`--prior-stats`), either directly or through `--prior-manifest`. The registry records width distributions, optional intensity summaries, and shape statistics for later plotting.
-- **How they are applied** – The BED overlap determines `PriorOverlap` and a per-peak `PriorWeight` (with a novelty penalty for unusually wide novel peaks). During differential testing, those overlap-aware weights are blended with any per-peak `IntZ` (intensity z) and `ShapeZ` (shape z) columns to form a unified score; the score is standardised, exponentiated, normalised to mean 1, and fed into the weighted Benjamini–Hochberg procedure (`prior_weight`, `p_weighted`, `q_weighted`). Log fold-changes and raw p-values are not directly altered.
-- **Why use them** – Overlap with a trusted catalogue down-weights p-values for familiar loci, while high-magnitude intensity/shape deviations (if supplied) push weights back toward 1, reducing over-confidence in discordant peaks. QC artefacts are still summarised (distributions, KDE plots, overlap tables), but the priors also influence multiple-testing correction through the weighting scheme rather than serving purely as quality checks.
+- **What gets loaded** – You can pass a BED (`--prior-bed`), bigWig (`--prior-bigwig`), and shape statistics table
+  (`--prior-stats`), either directly or through `--prior-manifest`. The registry records width distributions, optional
+  intensity summaries, and shape statistics for later plotting.
 
-To ship a reusable prior bundle, place the files next to a `prior_manifest.json` containing the keys `prior_bed`, `prior_bigwig`, `prior_stats`, and `prior_weight`; `example/run_with_prior.sh` demonstrates this layout end-to-end.
+- **How they are applied** – The BED overlap determines `PriorOverlap` and a per-peak `PriorWeight` (with a novelty penalty for
+  unusually wide novel peaks). During differential testing, those overlap-aware weights are blended with any per-peak `IntZ`
+  (intensity z) and `ShapeZ` (shape z) columns to form a unified score; the score is standardised, exponentiated, normalised to
+  mean 1, and fed into the weighted Benjamini–Hochberg procedure (`prior_weight`, `p_weighted`, `q_weighted`). Log fold-changes
+  and raw p-values are not directly altered.
+
+- **Why use them** – Overlap with a trusted catalogue down-weights p-values for familiar loci, while high-magnitude
+  intensity/shape deviations (if supplied) push weights back toward 1, reducing over-confidence in discordant peaks. QC
+  artefacts are still summarised (distributions, KDE plots, overlap tables), but the priors also influence multiple-testing
+  correction through the weighting scheme rather than serving purely as quality checks.
+
+To ship a reusable prior bundle, place the files next to a `prior_manifest.json` containing the keys `prior_bed`,
+`prior_bigwig`, `prior_stats`, and `prior_weight`. `example/run_with_prior.sh` demonstrates this layout end-to-end.
+
+---
 
 ## References
 - [PyDESeq2][pydeseq2]
