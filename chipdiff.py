@@ -635,15 +635,73 @@ def benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
     return pd.Series(adjusted, index=pvalues.index)
 
 
-def apply_weighted_bh(p_values, weights, alpha=0.05):
+def compute_prior_score(df):
     """
-    p_values: numpy array of raw p-values
-    weights: numpy array of non-negative prior weights
-             (they will be normalized to mean 1 inside the function)
+    df has columns PriorOverlap, IntZ, ShapeZ.
+    Returns a numpy array S_i: unified prior scores.
+    Recommended formula:
+        S_i = beta1 * PriorOverlap
+              - beta2 * abs(IntZ)
+              - beta3 * abs(ShapeZ)
+    with clipping of |z| at 4.
+    beta1=2.0, beta2=1.0, beta3=1.0 are fine defaults.
+    """
+
+    beta1, beta2, beta3 = 2.0, 1.0, 1.0
+
+    def _extract(column: str) -> np.ndarray:
+        if column in df:
+            series = pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+            return series.to_numpy(dtype=float)
+        return np.zeros(len(df), dtype=float)
+
+    overlap = _extract("PriorOverlap")
+    int_z = np.clip(np.abs(_extract("IntZ")), 0, 4)
+    shape_z = np.clip(np.abs(_extract("ShapeZ")), 0, 4)
+
+    return beta1 * overlap - beta2 * int_z - beta3 * shape_z
+
+
+def compute_prior_weights(df, gamma=0.5):
+    """
+    Convert prior score into FDR weights.
+
+    Steps:
+    1. Compute S_i = compute_prior_score(df)
+    2. Standardize: S_norm = (S_i - median) / MAD
+    3. Map to positive weights:
+           w_raw = exp(gamma * S_norm)
+    4. Normalize weights to mean 1:
+           w = w_raw / w_raw.mean()
+    Returns w (numpy array)
+    """
+
+    scores = compute_prior_score(df)
+    if scores.size == 0:
+        return scores
+
+    median = np.median(scores)
+    mad = np.median(np.abs(scores - median))
+    if mad == 0:
+        normalized = np.zeros_like(scores)
+    else:
+        normalized = (scores - median) / mad
+
+    w_raw = np.exp(gamma * normalized)
+    mean_weight = w_raw.mean()
+    if mean_weight == 0:
+        return np.ones_like(w_raw)
+    return w_raw / mean_weight
+
+
+def weighted_bh(p_values, weights, alpha=0.05):
+    """
+    p_values: raw p-values (unchanged)
+    weights: normalized weights from compute_prior_weights
     Returns:
-        p_weighted: weighted p-values (p / w)
+        p_weighted: p / w   (clipped at 1)
         q_weighted: BH-adjusted q-values on p_weighted
-        significant: boolean array of discoveries at FDR alpha
+        significant: boolean array for FDR alpha
     """
 
     pvals = np.asarray(p_values, dtype=float)
@@ -656,8 +714,6 @@ def apply_weighted_bh(p_values, weights, alpha=0.05):
         return pvals, pvals, np.asarray([], dtype=bool)
 
     pvals = np.clip(np.nan_to_num(pvals, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
-    w = np.clip(np.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
-
     mean_weight = w.mean()
     if mean_weight <= 0:
         w_norm = np.ones_like(w)
@@ -1315,31 +1371,36 @@ def run_pipeline(
 
     diff_res = call_differential_analysis(counts_df, conditions, library_sizes)
 
-    diff_res["prior_weight"] = consensus_prior_weights
-    diff_res["prior_overlap"] = consensus_prior_weights > 0
+    prior_adjusted_path: Optional[Path] = None
+    prior_adjusted: Optional[pd.DataFrame] = None
+    if not diff_res.empty:
+        prior_adjusted = diff_res.copy()
+        if "PriorOverlap" not in prior_adjusted.columns:
+            prior_adjusted["PriorOverlap"] = consensus_prior_weights > 0
+        if "IntZ" not in prior_adjusted.columns:
+            prior_adjusted["IntZ"] = 0.0
+        if "ShapeZ" not in prior_adjusted.columns:
+            prior_adjusted["ShapeZ"] = 0.0
+
+        weights = compute_prior_weights(prior_adjusted)
+        p_weighted, q_weighted, sig = weighted_bh(
+            prior_adjusted["pvalue"].to_numpy(), weights, alpha=0.05
+        )
+
+        prior_adjusted["prior_weight"] = weights
+        prior_adjusted["p_weighted"] = p_weighted
+        prior_adjusted["q_weighted"] = q_weighted
+        prior_adjusted["significant"] = sig
+
+        diff_res["prior_weight"] = prior_adjusted["prior_weight"]
+        diff_res["p_weighted"] = prior_adjusted["p_weighted"]
+        diff_res["q_weighted"] = prior_adjusted["q_weighted"]
+        diff_res["significant"] = prior_adjusted["significant"]
 
     diff_path = results_dir / "differential_results.tsv"
     diff_res.to_csv(diff_path, sep="\t")
 
-    prior_adjusted_path: Optional[Path] = None
-    if prior_registry.enabled and not diff_res.empty:
-        overlap_factor = consensus_prior_weights.clip(0, 1)
-        shrink_factor = 1.0 - prior_registry.weight * (1.0 - overlap_factor)
-        penalty_factor = 1.0 + prior_registry.weight * (1.0 - overlap_factor)
-        prior_adjusted = diff_res.copy()
-        prior_adjusted["prior_weight"] = overlap_factor
-        prior_adjusted["prior_overlap"] = overlap_factor > 0
-        prior_adjusted["log2FC_prior"] = diff_res["log2FC"] * shrink_factor
-        if "log2FC_shrunk" in diff_res.columns:
-            prior_adjusted["log2FC_shrunk_prior"] = diff_res["log2FC_shrunk"] * shrink_factor
-        if "lfcSE" in diff_res.columns:
-            prior_adjusted["lfcSE_prior"] = diff_res["lfcSE"] * penalty_factor
-        if "pvalue" in diff_res.columns:
-            p_weighted, q_weighted, _ = apply_weighted_bh(
-                diff_res["pvalue"].to_numpy(), overlap_factor.to_numpy(), alpha=0.05
-            )
-            prior_adjusted["pvalue_prior"] = p_weighted
-            prior_adjusted["padj_prior"] = q_weighted
+    if prior_registry.enabled and prior_adjusted is not None:
         prior_adjusted_path = results_dir / "differential_results_prior.tsv"
         prior_adjusted.to_csv(prior_adjusted_path, sep="\t")
 
