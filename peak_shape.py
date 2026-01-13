@@ -142,23 +142,42 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def load_bed(path: str) -> List[Interval]:
-    intervals: List[Interval] = []
-    with open(path) as handle:
-        for line in handle:
-            if not line.strip() or line.startswith("#"):
-                continue
-            parts = line.strip().split()
-            if len(parts) < 3:
-                LOGGER.warning("Skipping malformed BED line: %s", line.strip())
-                continue
-            chrom, start, end = parts[0], int(parts[1]), int(parts[2])
-            if end <= start:
-                LOGGER.warning("Skipping zero/negative length interval: %s", line.strip())
-                continue
-            name = parts[3] if len(parts) > 3 else f"{chrom}:{start}-{end}"
-            intervals.append(Interval(chrom=chrom, start=start, end=end, name=name))
-    if not intervals:
+    frame = pd.read_csv(path, sep=r"\s+", comment="#", header=None, dtype={0: str}, engine="python")
+    if frame.empty:
+        raise ValueError(f"No intervals found in BED file: {path}")
+    if frame.shape[1] < 3:
+        raise ValueError(f"BED file must contain at least 3 columns: {path}")
+
+    columns = ["Chromosome", "Start", "End", "Name"][: frame.shape[1]]
+    frame = frame.iloc[:, : len(columns)].copy()
+    frame.columns = columns
+
+    frame["Start"] = pd.to_numeric(frame["Start"], errors="coerce")
+    frame["End"] = pd.to_numeric(frame["End"], errors="coerce")
+
+    invalid = frame["Chromosome"].isna() | frame["Start"].isna() | frame["End"].isna()
+    invalid |= frame["End"] <= frame["Start"]
+    invalid_count = int(invalid.sum())
+    if invalid_count:
+        LOGGER.warning("Skipping %d invalid BED rows from %s", invalid_count, path)
+
+    frame = frame.loc[~invalid]
+    if frame.empty:
         raise ValueError(f"No valid intervals found in BED file: {path}")
+
+    if "Name" not in frame.columns:
+        frame["Name"] = None
+
+    intervals = []
+    for row in frame.itertuples(index=False):
+        chrom = str(row.Chromosome)
+        start = int(row.Start)
+        end = int(row.End)
+        name = row.Name
+        if name is None or pd.isna(name):
+            name = f"{chrom}:{start}-{end}"
+        intervals.append(Interval(chrom=chrom, start=start, end=end, name=str(name)))
+
     return intervals
 
 
@@ -214,11 +233,18 @@ def get_bigwig(sample: str) -> pyBigWig.pyBigWig:
 
 
 def run_subprocess(cmd: Sequence[str]) -> None:
-    LOGGER.info("Running command: %s", " ".join(cmd))
-    result = subprocess.run(cmd, check=False)
+    LOGGER.info("Running command: %s", shlex.join(cmd))
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if result.returncode != 0:
+        details = []
+        if result.stdout:
+            details.append(f"stdout:\n{result.stdout.strip()}")
+        if result.stderr:
+            details.append(f"stderr:\n{result.stderr.strip()}")
+        extra = "\n".join(details)
         raise RuntimeError(
-            f"Command failed with exit code {result.returncode}: {' '.join(cmd)}"
+            f"Command failed with exit code {result.returncode}: {shlex.join(cmd)}"
+            + (f"\n{extra}" if extra else "")
         )
 
 
@@ -670,4 +696,3 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -46,7 +46,7 @@ individual libraries are available.
 ### Requirements
 - Python ≥ 3.10 (tested with Python 3.10).
 - Python libraries: `numpy`, `pandas`, `scipy`, `statsmodels`, `matplotlib`, `seaborn`, `pyranges`, `gseapy`, `pydeseq2`.
-- External tools: [MACS2/3][macs2], [deepTools][deeptools], and [samtools][samtools].
+- External tools: [MACS2/3][macs2], [deepTools][deeptools] (including `multiBamSummary` and `bamCoverage`), and [samtools][samtools].
 
 ### Install commands
 ```bash
@@ -210,6 +210,7 @@ fold-change estimates directly comparable.
 
 - **Missing optional dependencies** – PyDESeq2, gseapy, and pyBigWig are only required for specific features. If the CLI warns about a missing module you can either install it (`pip install pydeseq2 gseapy pybigwig`) or run the pipeline without that capability.
 - **External tool failures** – PeakForge wraps MACS2, deepTools, and samtools. Check their versions with `macs2 --version`, `multiBamSummary --version`, and `samtools --version` if a subprocess error occurs.
+- **Peak shape inputs** – `peakshape` uses `bamCoverage` to convert BAMs to bigWig tracks. Install deepTools or provide `--bigwig-a/--bigwig-b` inputs if `bamCoverage` is not available.
 - **Empty consensus sets** – ensure that MACS2 produced peaks or provide existing peak files via the metadata sheet. Lowering `--min-overlap` can help when combining sparse datasets.
 
 ---
