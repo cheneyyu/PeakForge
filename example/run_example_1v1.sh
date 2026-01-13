@@ -16,7 +16,7 @@ mkdir -p "${RESULTS_DIR}" "${RESULTS_DIR}/peaks"
 
 echo "[peakforge] Running 1v1 example -> ${RESULTS_DIR}" \
   && python "${PROJECT_ROOT}/chipdiff.py" \
-    tsvmode "${METADATA}" \
+    run "${METADATA}" \
     --output-dir "${RESULTS_DIR}" \
     --peak-dir "${RESULTS_DIR}/peaks" \
     --min-overlap 1 \

@@ -185,7 +185,7 @@ fi
 mkdir -p "${OUTPUT_DIR}" "${OUTPUT_DIR}/peaks"
 
 CMD=(
-  python "${PROJECT_ROOT}/chipdiff.py" runmode
+  python "${PROJECT_ROOT}/chipdiff.py" diff
   --condition-a "${COND_A}"
   --a-bams "${A_BAMS[@]}"
   --condition-b "${COND_B}"

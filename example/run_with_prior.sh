@@ -36,7 +36,7 @@ cat <<EOF > "${MANIFEST}"
 EOF
 
 echo "[prior-demo] Running PeakForge differential pipeline with priors"
-"${PROJECT_ROOT}/peakforge" tsvmode "${PROJECT_ROOT}/example/data/metadata_1v1.tsv" \
+"${PROJECT_ROOT}/peakforge" run "${PROJECT_ROOT}/example/data/metadata_1v1.tsv" \
   --output-dir "${OUT_DIR}" \
   --prior-manifest "${MANIFEST}" \
   --prior-weight 0.4
@@ -52,7 +52,7 @@ SHAPE_OUT="${OUT_DIR}/shape"
 mkdir -p "${SHAPE_OUT}"
 
 echo "[prior-demo] Running peak shape comparison with priors"
-"${PROJECT_ROOT}/peakforge" peakshape \
+"${PROJECT_ROOT}/peakforge" shape \
   --bigwig-a "${PEAK_SHAPE_DATA}/demo_sample_A.bw" \
   --bigwig-b "${PEAK_SHAPE_DATA}/demo_sample_B.bw" \
   --bed "${PEAK_SHAPE_DATA}/demo_regions.bed" \

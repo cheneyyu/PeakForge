@@ -1,0 +1,5 @@
+{
+  "prior_bed": "/app/results/prior_demo/prior_inputs/demo_prior.bed",
+  "prior_stats": "/app/results/prior_demo/prior_inputs/demo_shape.json",
+  "prior_weight": 0.4
+}

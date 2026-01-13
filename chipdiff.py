@@ -2,58 +2,20 @@
 """chipdiff.py
 
 End-to-end pipeline for CUT&Tag / ChIP-seq differential analysis.
-
-The script expects a sample sheet describing the input BAM files and
-(optional) pre-computed peak files.  The sample sheet must be a tab- or
-comma-delimited text file with the following required columns:
-
-    sample    Unique sample identifier (no spaces)
-    condition    Experimental condition or group label
-    bam    Path to the aligned reads in BAM format
-
-Optional columns:
-
-    peaks    Path to an existing peak file (narrowPeak or broadPeak)
-    peak_type    One of {auto, narrow, broad}.  ``auto`` (default)
-                 attempts to infer the peak type from the file name.
-
-Example TSV sample sheet::
-
-    sample  condition   bam                 peaks               peak_type
-    S1      treated     data/S1.bam         data/S1_peaks.bed   narrow
-    S2      treated     data/S2.bam         -                   -
-    C1      control     data/C1.bam         data/C1_broad.bed   broad
-
-The pipeline performs the following steps:
-
-1. Peak calling with MACS2 (if required).
-2. Construction of consensus peaks across samples.
-3. Counting read overlaps per consensus peak using deepTools
-   ``multiBamSummary``.
-4. Differential analysis with PyDESeq2 (replicated designs) or the
-   MARS method (no replicates).
-5. Optional annotation against a GTF file and Enrichr enrichment via
-   gseapy.
-6. Plot generation (volcano, MA, correlation, heatmap) and metadata
-   capture.
-
-Dependencies: numpy, pandas, scipy, statsmodels, matplotlib, seaborn,
-pyranges, gseapy, MACS2, deepTools.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import math
-import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -64,30 +26,37 @@ from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 from scipy import stats
 
+import typer
+from typing_extensions import Annotated
+from rich.logging import RichHandler
+
 try:
     from pydeseq2.dds import DeseqDataSet
     from pydeseq2.ds import DeseqStats
-except ImportError:  # pragma: no cover - optional dependency
-    DeseqDataSet = None  # type: ignore[assignment]
-    DeseqStats = None  # type: ignore[assignment]
+except ImportError:
+    DeseqDataSet = None
+    DeseqStats = None
 
 try:
     import gseapy
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:
     gseapy = None
 
 import peak_shape
 from io_utils import ensure_integer_columns, read_bed_frame
 from prior_utils import PriorRegistry, load_prior_manifest
 
+# Initialize Typer app
+app = typer.Typer(
+    name="peakforge",
+    help="PeakForge: A modern ChIP-seq/CUT&Tag differential analysis toolkit.",
+    add_completion=False,
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+
 
 def _detect_macs_command() -> str:
-    """Resolve the available MACS executable.
-
-    Preference is given to ``macs2`` when present; otherwise ``macs3`` is used.
-    A runtime error is raised when neither executable is found on ``PATH``.
-    """
-
     for candidate in ("macs2", "macs3"):
         if shutil.which(candidate):
             return candidate
@@ -97,8 +66,6 @@ def _detect_macs_command() -> str:
 
 
 MACS_COMMAND: Optional[str] = None
-"""Name of the resolved MACS executable (``macs2`` preferred, ``macs3`` fallback)."""
-
 
 
 # ---------------------------------------------------------------------------
@@ -108,8 +75,6 @@ MACS_COMMAND: Optional[str] = None
 
 @dataclass
 class SampleEntry:
-    """Representation of a single sample entry from the metadata sheet."""
-
     sample: str
     condition: str
     bam: Path
@@ -142,11 +107,6 @@ def ensure_commands(commands: Sequence[str]) -> None:
 
 
 def get_macs_command() -> str:
-    """Return the available MACS executable, preferring ``macs2``.
-
-    The resolved command is cached for subsequent calls.
-    """
-
     global MACS_COMMAND
     if MACS_COMMAND is None:
         MACS_COMMAND = _detect_macs_command()
@@ -154,8 +114,6 @@ def get_macs_command() -> str:
 
 
 def ensure_python_version(min_version: tuple[int, int] = (3, 10)) -> None:
-    """Guard against unsupported Python interpreters."""
-
     if sys.version_info < min_version:
         formatted = ".".join(str(part) for part in min_version)
         raise RuntimeError(
@@ -164,8 +122,6 @@ def ensure_python_version(min_version: tuple[int, int] = (3, 10)) -> None:
 
 
 def run_command(cmd: Sequence[str], *, workdir: Optional[Path] = None, log: bool = True) -> None:
-    """Run a subprocess command with logging and error handling."""
-
     if log:
         logging.info("Running command: %s", " ".join(cmd))
     result = subprocess.run(cmd, cwd=str(workdir) if workdir else None, check=False)
@@ -183,7 +139,6 @@ def _bam_index_candidates(bam: Path) -> List[Path]:
     candidates.append(Path(f"{bam}.bai"))
     if bam.suffix:
         candidates.append(bam.with_suffix(".bai"))
-    # Remove duplicates while preserving order
     seen: Set[Path] = set()
     unique: List[Path] = []
     for candidate in candidates:
@@ -206,8 +161,6 @@ def ensure_bam_index(bam: Path, samtools_path: str, threads: int = 1) -> None:
 
 
 def detect_paired_end_bam(bam: Path, samtools_path: str, threads: int = 1) -> bool:
-    """Return ``True`` if the BAM contains paired-end reads."""
-
     cmd = [samtools_path, "view", "-c", "-f", "1"]
     if threads > 1:
         cmd.extend(["-@", str(threads)])
@@ -220,7 +173,7 @@ def detect_paired_end_bam(bam: Path, samtools_path: str, threads: int = 1) -> bo
         )
     try:
         count = int(result.stdout.strip() or 0)
-    except ValueError as exc:  # pragma: no cover - defensive
+    except ValueError as exc:
         raise RuntimeError(f"Unable to parse samtools view output for {bam}: {result.stdout!r}") from exc
 
     paired = count > 0
@@ -267,11 +220,9 @@ def compute_library_sizes(samples: Sequence[SampleEntry], samtools_path: str, th
 
 
 def read_table(path: Path) -> pd.DataFrame:
-    """Read a delimited table inferring delimiter automatically."""
-
     try:
         df = pd.read_csv(path, sep=None, engine="python")
-    except Exception as exc:  # pragma: no cover - passthrough error
+    except Exception as exc:
         raise RuntimeError(f"Failed to read metadata file {path}: {exc}")
     return df
 
@@ -343,8 +294,6 @@ def infer_peak_type(path: Path, declared: str, default: str) -> str:
 
 
 def read_peak_file(path: Path, peak_type: str, peak_extension: int) -> pr.PyRanges:
-    """Load peaks into a :class:`pyranges.PyRanges` object."""
-
     frame = read_bed_frame(path)
     frame = ensure_integer_columns(frame, ("Start", "End"))
 
@@ -405,8 +354,6 @@ def call_macs2(
     peak_type: str,
     macs2_extra: Optional[List[str]] = None,
 ) -> Path:
-    """Call MACS2 for a sample and return the resulting peak file path."""
-
     cmd, peak_path = _macs2_command(
         sample,
         output_dir=output_dir,
@@ -439,8 +386,6 @@ def load_all_peaks(
     peak_output_dir: Path,
     prior_registry: Optional[PriorRegistry] = None,
 ) -> Dict[str, pr.PyRanges]:
-    """Ensure every sample has peak calls and return PyRanges per sample."""
-
     peak_ranges: Dict[str, pr.PyRanges] = {}
     macs2_jobs: List[Macs2Job] = []
 
@@ -505,8 +450,6 @@ def load_all_peaks(
 
 
 def build_consensus(peak_ranges: Dict[str, pr.PyRanges], *, min_overlap: int) -> pr.PyRanges:
-    """Build consensus peaks across samples with minimum overlap criteria."""
-
     logging.info("Building consensus peaks across %d samples", len(peak_ranges))
     if not peak_ranges:
         return pr.PyRanges()
@@ -533,8 +476,6 @@ def build_consensus(peak_ranges: Dict[str, pr.PyRanges], *, min_overlap: int) ->
 
 
 def load_consensus_bed(path: Path) -> pr.PyRanges:
-    """Load an existing consensus BED file into a ``PyRanges`` object."""
-
     if not path.exists():
         raise FileNotFoundError(f"Consensus BED file not found: {path}")
 
@@ -561,7 +502,6 @@ def load_consensus_bed(path: Path) -> pr.PyRanges:
                     value = raw_str
         if not value:
             value = f"consensus_{idx + 1}"
-        # Guarantee uniqueness in case the BED supplies duplicates
         candidate = value
         suffix = 1
         while candidate in seen:
@@ -636,17 +576,6 @@ def benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
 
 
 def compute_prior_score(df):
-    """
-    df has columns PriorOverlap, IntZ, ShapeZ.
-    Returns a numpy array S_i: unified prior scores.
-    Recommended formula:
-        S_i = beta1 * PriorOverlap
-              - beta2 * abs(IntZ)
-              - beta3 * abs(ShapeZ)
-    with clipping of |z| at 4.
-    beta1=2.0, beta2=1.0, beta3=1.0 are fine defaults.
-    """
-
     beta1, beta2, beta3 = 2.0, 1.0, 1.0
 
     def _extract(column: str) -> np.ndarray:
@@ -663,19 +592,6 @@ def compute_prior_score(df):
 
 
 def compute_prior_weights(df, gamma=0.5):
-    """
-    Convert prior score into FDR weights.
-
-    Steps:
-    1. Compute S_i = compute_prior_score(df)
-    2. Standardize: S_norm = (S_i - median) / MAD
-    3. Map to positive weights:
-           w_raw = exp(gamma * S_norm)
-    4. Normalize weights to mean 1:
-           w = w_raw / w_raw.mean()
-    Returns w (numpy array)
-    """
-
     scores = compute_prior_score(df)
     if scores.size == 0:
         return scores
@@ -695,15 +611,6 @@ def compute_prior_weights(df, gamma=0.5):
 
 
 def weighted_bh(p_values, weights, alpha=0.05):
-    """
-    p_values: raw p-values (unchanged)
-    weights: normalized weights from compute_prior_weights
-    Returns:
-        p_weighted: p / w   (clipped at 1)
-        q_weighted: BH-adjusted q-values on p_weighted
-        significant: boolean array for FDR alpha
-    """
-
     pvals = np.asarray(p_values, dtype=float)
     w = np.asarray(weights, dtype=float)
 
@@ -779,8 +686,6 @@ def pydeseq2_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.Dat
 def mars_differential(
     counts: pd.DataFrame, conditions: pd.Series, library_sizes: pd.Series
 ) -> pd.DataFrame:
-    """Implement the MARS method for designs without replicates."""
-
     logging.info("Running MARS differential analysis (no replicates)")
     samples = counts.columns.tolist()
     cond_series = conditions.loc[samples]
@@ -881,8 +786,6 @@ def mars_differential(
 def call_differential_analysis(
     counts: pd.DataFrame, conditions: pd.Series, library_sizes: pd.Series
 ) -> pd.DataFrame:
-    """Select and run the appropriate differential analysis workflow."""
-
     if counts.empty:
         raise ValueError("Counts matrix is empty; cannot perform differential analysis")
     if conditions.nunique() != 2:
@@ -928,7 +831,7 @@ def run_enrichr(genes: Sequence[str], out_dir: Path, description: str = "top_gen
             outdir=str(out_dir),
             cutoff=0.5,
         )
-    except Exception as exc:  # pragma: no cover - network dependent
+    except Exception as exc:
         logging.warning("Enrichr analysis failed: %s", exc)
         return None
     report = Path(enr.res2d_path) if hasattr(enr, "res2d_path") else None
@@ -1003,8 +906,6 @@ def plot_top_heatmap(counts: pd.DataFrame, results: pd.DataFrame, output: Path, 
 
 def plot_differential_summary(results: pd.DataFrame, output: Path, *, counts: Optional[pd.DataFrame] = None,
                               top_n: int = 20) -> None:
-    """Create an overview scatter plot inspired by clusterProfiler dotplots."""
-
     required = {"padj", "log2FC"}
     missing = [col for col in required if col not in results.columns]
     if missing:
@@ -1115,8 +1016,6 @@ def plot_differential_summary(results: pd.DataFrame, output: Path, *, counts: Op
 
 
 def generate_differential_plots(results: pd.DataFrame, counts: pd.DataFrame, output_dir: Path) -> Dict[str, Path]:
-    """Produce all differential analysis visualisations."""
-
     ensure_directory(output_dir)
     outputs = {
         "sample_correlation": output_dir / "sample_correlation.png",
@@ -1152,7 +1051,7 @@ def save_metadata(metadata: Dict, output_path: Path) -> None:
 
 
 def run_pipeline(
-    args: argparse.Namespace,
+    args: SimpleNamespace,
     *,
     samples: Optional[List[SampleEntry]] = None,
     metadata_path: Optional[Path] = None,
@@ -1179,7 +1078,7 @@ def run_pipeline(
     ensure_commands(required_cmds)
 
     samtools_path = shutil.which("samtools")
-    if samtools_path is None:  # pragma: no cover - defensive (ensure_commands guards)
+    if samtools_path is None:
         raise RuntimeError("samtools not found on PATH after validation")
 
     for sample in samples:
@@ -1301,10 +1200,6 @@ def run_pipeline(
     counts_tsv = run_multibamsummary(consensus_bed, samples, results_dir / "counts", threads=args.threads)
     raw_counts = pd.read_csv(counts_tsv, sep="\t")
 
-    # deepTools 3.5 switched to quoting header labels in TSV output.  Clean up
-    # the column names so downstream logic can match against the expected
-    # ``chrom`` / ``start`` / ``end`` headers and sample BAM names regardless
-    # of whether they were quoted or prefixed with ``#``.
     def _normalise_header(value: str) -> str:
         cleaned = value.strip()
         cleaned = cleaned.lstrip("#")
@@ -1313,9 +1208,6 @@ def run_pipeline(
 
     raw_counts.rename(columns={col: _normalise_header(col) for col in raw_counts.columns}, inplace=True)
 
-    # deepTools historically used ``#chr`` for the chromosome column but some
-    # versions emit ``#chrom`` or even plain ``chrom``.  Normalise these headers
-    # so downstream joins can rely on a canonical ``Chromosome`` column.
     chromosome_aliases = {
         "#chrom",
         "#chr",
@@ -1521,147 +1413,171 @@ def _build_condition_samples(
     return entries
 
 
-def build_runmode_samples(args: argparse.Namespace) -> List[SampleEntry]:
-    a_peaks = args.a_peaks or []
-    b_peaks = args.b_peaks or []
-
-    used_names: Set[str] = set()
-    samples = _build_condition_samples(args.condition_a, args.a_bams, a_peaks, used_names)
-    samples.extend(_build_condition_samples(args.condition_b, args.b_bams, b_peaks, used_names))
-    return samples
-
-
-def add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--output-dir", default="results", help="Output directory")
-    parser.add_argument("--peak-dir", default="peaks", help="Directory for peak calls")
-    parser.add_argument(
-        "--consensus-peaks",
-        help="Use an existing consensus BED instead of building peaks from samples",
+def configure_logging(level: str = "INFO"):
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(rich_tracebacks=True, markup=True)]
     )
-    parser.add_argument(
-        "--peak-type",
-        default="narrow",
-        choices=["narrow", "broad"],
-        help="Default peak type when calling MACS2",
-    )
-    parser.add_argument(
-        "--peak-extension",
-        type=int,
-        default=250,
-        help="Extension for narrow peaks when building consensus windows (bp)",
-    )
-    parser.add_argument(
-        "--min-overlap",
-        type=int,
-        default=2,
-        help="Minimum samples required for consensus peak",
-    )
-    parser.add_argument("--macs2-genome", default="hs", help="MACS2 genome size (e.g. hs, mm, 2.7e9)")
-    parser.add_argument("--macs2-qvalue", type=float, default=0.01, help="MACS2 q-value cutoff")
-    parser.add_argument(
-        "--macs2-extra",
-        nargs=argparse.REMAINDER,
-        default=[],
-        help="Additional arguments for MACS2",
-    )
-    parser.add_argument("--prior-bed", help="BED file describing prior peaks")
-    parser.add_argument("--prior-bigwig", help="bigWig of reference signal intensities for priors")
-    parser.add_argument("--prior-manifest", help="Manifest (JSON or key=value) describing prior resources")
-    parser.add_argument(
-        "--prior-weight",
-        type=float,
-        default=0.3,
-        help="Strength of the prior regularisation (0 disables influence)",
-    )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=16,
-        help="Threads for multiBamSummary (--numberOfProcessors)",
-    )
-    parser.add_argument("--gtf", help="Optional GTF file for annotation")
-    parser.add_argument("--enrichr", action="store_true", help="Run Enrichr GO Biological Process analysis")
-    parser.add_argument("--enrichr-top", type=int, default=200, help="Number of top peaks for enrichment")
-    parser.add_argument("--log-level", default="INFO", help="Logging level")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="peakforge",
-        description="CUT&Tag / ChIP-seq differential analysis pipeline",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+@app.command(name="run", help="Run the pipeline using a sample sheet (TSV/CSV).")
+def run_command(
+    metadata: Annotated[Path, typer.Argument(help="Path to metadata TSV/CSV file.", exists=True)],
+    output_dir: Annotated[Path, typer.Option(help="Output directory")] = Path("results"),
+    peak_dir: Annotated[Path, typer.Option(help="Directory for peak calls")] = Path("peaks"),
+    consensus_peaks: Annotated[Optional[Path], typer.Option(help="Use existing consensus BED")] = None,
+    peak_type: Annotated[str, typer.Option(help="Default peak type for MACS2 (narrow or broad)")] = "narrow",
+    peak_extension: Annotated[int, typer.Option(help="Extension for narrow peaks (bp)")] = 250,
+    min_overlap: Annotated[int, typer.Option(help="Minimum samples required for consensus")] = 2,
+    macs2_genome: Annotated[str, typer.Option(help="MACS2 genome size (hs, mm, etc)")] = "hs",
+    macs2_qvalue: Annotated[float, typer.Option(help="MACS2 q-value cutoff")] = 0.01,
+    macs2_extra: Annotated[Optional[List[str]], typer.Option(help="Extra arguments for MACS2")] = None,
+    prior_bed: Annotated[Optional[Path], typer.Option(help="BED file describing prior peaks")] = None,
+    prior_bigwig: Annotated[Optional[Path], typer.Option(help="bigWig for prior signal")] = None,
+    prior_manifest: Annotated[Optional[Path], typer.Option(help="Manifest JSON for priors")] = None,
+    prior_weight: Annotated[float, typer.Option(help="Prior regularization weight")] = 0.3,
+    threads: Annotated[int, typer.Option(help="Number of threads")] = 16,
+    gtf: Annotated[Optional[Path], typer.Option(help="GTF file for annotation")] = None,
+    enrichr: Annotated[bool, typer.Option(help="Run Enrichr analysis")] = False,
+    enrichr_top: Annotated[int, typer.Option(help="Top peaks for enrichment")] = 200,
+    log_level: Annotated[str, typer.Option(help="Logging level")] = "INFO",
+):
+    configure_logging(log_level)
+    args = SimpleNamespace(
+        metadata=metadata,
+        output_dir=output_dir,
+        peak_dir=peak_dir,
+        consensus_peaks=consensus_peaks,
+        peak_type=peak_type,
+        peak_extension=peak_extension,
+        min_overlap=min_overlap,
+        macs2_genome=macs2_genome,
+        macs2_qvalue=macs2_qvalue,
+        macs2_extra=macs2_extra or [],
+        prior_bed=prior_bed,
+        prior_bigwig=prior_bigwig,
+        prior_manifest=prior_manifest,
+        prior_weight=prior_weight,
+        threads=threads,
+        gtf=gtf,
+        enrichr=enrichr,
+        enrichr_top=enrichr_top,
+        log_level=log_level,
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    run_pipeline(args, metadata_path=metadata)
 
-    tsv_parser = subparsers.add_parser(
-        "tsvmode",
-        help="Run the pipeline using a metadata TSV/CSV sheet",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    tsv_parser.add_argument("metadata", help="Sample sheet (TSV/CSV)")
-    add_common_arguments(tsv_parser)
 
-    run_parser = subparsers.add_parser(
-        "runmode",
-        help="Run the pipeline by specifying BAM/peak files directly",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+@app.command(name="diff", help="Run differential analysis with explicit inputs (no sample sheet).")
+def diff_command(
+    condition_a: Annotated[str, typer.Option(help="Name of condition A")],
+    a_bams: Annotated[List[str], typer.Option(help="BAM files for condition A")],
+    condition_b: Annotated[str, typer.Option(help="Name of condition B")],
+    b_bams: Annotated[List[str], typer.Option(help="BAM files for condition B")],
+    a_peaks: Annotated[Optional[List[str]], typer.Option(help="Peak files for condition A")] = None,
+    b_peaks: Annotated[Optional[List[str]], typer.Option(help="Peak files for condition B")] = None,
+    output_dir: Annotated[Path, typer.Option(help="Output directory")] = Path("results"),
+    peak_dir: Annotated[Path, typer.Option(help="Directory for peak calls")] = Path("peaks"),
+    consensus_peaks: Annotated[Optional[Path], typer.Option(help="Use existing consensus BED")] = None,
+    peak_type: Annotated[str, typer.Option(help="Default peak type for MACS2 (narrow or broad)")] = "narrow",
+    peak_extension: Annotated[int, typer.Option(help="Extension for narrow peaks (bp)")] = 250,
+    min_overlap: Annotated[int, typer.Option(help="Minimum samples required for consensus")] = 2,
+    macs2_genome: Annotated[str, typer.Option(help="MACS2 genome size (hs, mm, etc)")] = "hs",
+    macs2_qvalue: Annotated[float, typer.Option(help="MACS2 q-value cutoff")] = 0.01,
+    macs2_extra: Annotated[Optional[List[str]], typer.Option(help="Extra arguments for MACS2")] = None,
+    prior_bed: Annotated[Optional[Path], typer.Option(help="BED file describing prior peaks")] = None,
+    prior_bigwig: Annotated[Optional[Path], typer.Option(help="bigWig for prior signal")] = None,
+    prior_manifest: Annotated[Optional[Path], typer.Option(help="Manifest JSON for priors")] = None,
+    prior_weight: Annotated[float, typer.Option(help="Prior regularization weight")] = 0.3,
+    threads: Annotated[int, typer.Option(help="Number of threads")] = 16,
+    gtf: Annotated[Optional[Path], typer.Option(help="GTF file for annotation")] = None,
+    enrichr: Annotated[bool, typer.Option(help="Run Enrichr analysis")] = False,
+    enrichr_top: Annotated[int, typer.Option(help="Top peaks for enrichment")] = 200,
+    log_level: Annotated[str, typer.Option(help="Logging level")] = "INFO",
+):
+    configure_logging(log_level)
+    # Construct a mock args object for build_runmode_samples
+    args = SimpleNamespace(
+        condition_a=condition_a,
+        a_bams=a_bams,
+        a_peaks=a_peaks,
+        condition_b=condition_b,
+        b_bams=b_bams,
+        b_peaks=b_peaks,
+        output_dir=output_dir,
+        peak_dir=peak_dir,
+        consensus_peaks=consensus_peaks,
+        peak_type=peak_type,
+        peak_extension=peak_extension,
+        min_overlap=min_overlap,
+        macs2_genome=macs2_genome,
+        macs2_qvalue=macs2_qvalue,
+        macs2_extra=macs2_extra or [],
+        prior_bed=prior_bed,
+        prior_bigwig=prior_bigwig,
+        prior_manifest=prior_manifest,
+        prior_weight=prior_weight,
+        threads=threads,
+        gtf=gtf,
+        enrichr=enrichr,
+        enrichr_top=enrichr_top,
+        log_level=log_level,
     )
-    run_parser.add_argument("--condition-a", required=True, help="Reference condition label")
-    run_parser.add_argument("--a-bams", nargs="+", required=True, help="BAM files for condition A")
-    run_parser.add_argument(
-        "--a-peaks",
-        nargs="*",
-        default=None,
-        help="Optional peak files aligned with --a-bams",
-    )
-    run_parser.add_argument("--condition-b", required=True, help="Contrast condition label")
-    run_parser.add_argument("--b-bams", nargs="+", required=True, help="BAM files for condition B")
-    run_parser.add_argument(
-        "--b-peaks",
-        nargs="*",
-        default=None,
-        help="Optional peak files aligned with --b-bams",
-    )
-    add_common_arguments(run_parser)
+    samples = build_runmode_samples(args)
+    run_pipeline(args, samples=samples)
 
-    peakshape_parser = subparsers.add_parser(
-        "peakshape",
-        help="Run peak shape profiling for two bigWig tracks",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+
+@app.command(name="shape", help="Analyze peak shapes.")
+def shape_command(
+    bed: Annotated[str, typer.Option(help="BED file with regions")],
+    bigwig_a: Annotated[Optional[str], typer.Option(help="Path to sample A bigWig")] = None,
+    bam_a: Annotated[Optional[str], typer.Option(help="Path to sample A BAM")] = None,
+    bigwig_b: Annotated[Optional[str], typer.Option(help="Path to sample B bigWig")] = None,
+    bam_b: Annotated[Optional[str], typer.Option(help="Path to sample B BAM")] = None,
+    core: Annotated[int, typer.Option(help="Half-width of core window (bp)")] = 500,
+    flank: Annotated[Tuple[int, int], typer.Option(help="Flank window range (bp)")] = (1000, 3000),
+    fwhm_threshold: Annotated[float, typer.Option(help="Fraction of max for FWHM")] = 0.5,
+    threads: Annotated[int, typer.Option(help="Number of threads")] = 1,
+    out: Annotated[str, typer.Option(help="Output directory")] = "results/shape",
+    prior_shape: Annotated[Optional[str], typer.Option(help="Prior shape stats file")] = None,
+    prior_weight: Annotated[float, typer.Option(help="Prior weight")] = 0.3,
+    bamcoverage_bin_size: Annotated[int, typer.Option(help="Bin size for bamCoverage")] = 10,
+    bamcoverage_normalization: Annotated[str, typer.Option(help="Normalization for bamCoverage")] = "RPKM",
+    bamcoverage_extra_args: Annotated[str, typer.Option(help="Extra args for bamCoverage")] = "",
+    log_level: Annotated[str, typer.Option(help="Logging level")] = "INFO",
+):
+    configure_logging(log_level)
+    args = SimpleNamespace(
+        bed=bed,
+        bigwig_a=bigwig_a,
+        bam_a=bam_a,
+        bigwig_b=bigwig_b,
+        bam_b=bam_b,
+        core=core,
+        flank=list(flank),
+        fwhm_threshold=fwhm_threshold,
+        threads=threads,
+        out=out,
+        prior_shape=prior_shape,
+        prior_weight=prior_weight,
+        bamcoverage_bin_size=bamcoverage_bin_size,
+        bamcoverage_normalization=bamcoverage_normalization,
+        bamcoverage_extra_args=bamcoverage_extra_args,
+        log_level=log_level
     )
-    peak_shape.add_cli_arguments(peakshape_parser)
-
-    return parser
-
+    peak_shape.run_peak_shape(args)
 
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
+def main() -> None:
     ensure_python_version()
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="[%(asctime)s] %(levelname)s: %(message)s",
-    )
-
     try:
-        if args.command == "tsvmode":
-            metadata_path = Path(args.metadata)
-            samples = load_samples(metadata_path)
-            run_pipeline(args, samples=samples, metadata_path=metadata_path)
-        elif args.command == "runmode":
-            samples = build_runmode_samples(args)
-            run_pipeline(args, samples=samples, metadata_path=None)
-        elif args.command == "peakshape":
-            peak_shape.run_peak_shape(args)
-        else:  # pragma: no cover - defensive guard
-            parser.print_help()
-            sys.exit(1)
-    except Exception as exc:  # pragma: no cover - CLI exception reporting
+        app()
+    except Exception as exc:
         logging.error("Pipeline failed: %s", exc)
         sys.exit(1)
 
