@@ -717,6 +717,129 @@ def compute_prior_weights(df, gamma=0.5):
     return w_raw / mean_weight
 
 
+def load_shape_covariates(shape_tsv: Path, peak_index: pd.Index, consensus_df: pd.DataFrame) -> pd.DataFrame:
+    """Load external peak-shape results and align them to differential peak IDs.
+
+    This integrates *independent* ``peak_shape`` outputs as external prior
+    covariates for weighted FDR only. It does not change raw log2FC or raw
+    p-values from differential testing.
+    """
+
+    try:
+        shape_df = pd.read_csv(shape_tsv, sep=None, engine="python")
+    except Exception as exc:  # pragma: no cover - defensive IO
+        logging.warning("Unable to read shape TSV %s: %s", shape_tsv, exc)
+        return pd.DataFrame(index=peak_index)
+
+    if shape_df.empty:
+        logging.warning("Shape TSV is empty: %s", shape_tsv)
+        return pd.DataFrame(index=peak_index)
+
+    peakid_candidates = ["peak_id", "PeakId", "PeakID"]
+    name_candidates = ["Name", "Peak", "consensus_peak", "consensus_name", "peak_name"]
+    peakid_col = next((column for column in peakid_candidates if column in shape_df.columns), None)
+    name_col = next((column for column in name_candidates if column in shape_df.columns), None)
+
+    if peakid_col is None and name_col is None:
+        logging.warning(
+            "Shape TSV %s has no peak identifier columns (expected one of %s or %s); skipping merge",
+            shape_tsv,
+            peakid_candidates,
+            name_candidates,
+        )
+        return pd.DataFrame(index=peak_index)
+
+    if "ShapeZ" not in shape_df.columns:
+        preferred_z_cols = ["shape_z", "Shape_z", "ShapeDeviationZ", "PriorShapeDeviation_z"]
+        z_source = next((column for column in preferred_z_cols if column in shape_df.columns), None)
+        if z_source is None:
+            generic_z_cols = [
+                column for column in shape_df.columns
+                if column.endswith("_z") and not column.startswith(("A_", "B_"))
+            ]
+            if len(generic_z_cols) == 1:
+                z_source = generic_z_cols[0]
+            elif len(generic_z_cols) > 1:
+                shape_df["ShapeZ"] = (
+                    shape_df[generic_z_cols]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .mean(axis=1)
+                )
+                logging.info(
+                    "Shape TSV %s has multiple *_z columns; using their mean as ShapeZ (%s)",
+                    shape_tsv,
+                    ", ".join(generic_z_cols),
+                )
+        if z_source is not None and "ShapeZ" not in shape_df.columns:
+            shape_df["ShapeZ"] = pd.to_numeric(shape_df[z_source], errors="coerce")
+            logging.info("Using shape column '%s' as ShapeZ", z_source)
+        elif "ShapeZ" not in shape_df.columns and "PriorShapeDeviation" in shape_df.columns:
+            shape_df["ShapeZ"] = pd.to_numeric(shape_df["PriorShapeDeviation"], errors="coerce")
+            logging.info("Using PriorShapeDeviation as approximate ShapeZ")
+
+    keep_cols = [column for column in ["PriorShapeDeviation", "PriorShapeCategory", "ShapeZ"] if column in shape_df.columns]
+    if not keep_cols:
+        logging.info("Shape TSV %s has no mergeable shape-prior columns; continuing without ShapeZ", shape_tsv)
+        return pd.DataFrame(index=peak_index)
+
+    aligned = pd.DataFrame(index=peak_index)
+    if peakid_col is not None:
+        by_peakid = shape_df[[peakid_col, *keep_cols]].copy()
+        by_peakid = by_peakid.dropna(subset=[peakid_col]).drop_duplicates(subset=[peakid_col], keep="last")
+        by_peakid = by_peakid.set_index(peakid_col)
+        aligned = aligned.join(by_peakid.reindex(peak_index), how="left")
+
+    if name_col is not None:
+        by_name = shape_df[[name_col, *keep_cols]].copy()
+        by_name = by_name.dropna(subset=[name_col]).drop_duplicates(subset=[name_col], keep="last")
+        by_name = by_name.set_index(name_col)
+        for column in keep_cols:
+            if column not in aligned.columns:
+                aligned[column] = np.nan
+        direct_fill_mask = aligned[keep_cols].isna().all(axis=1)
+        if direct_fill_mask.any():
+            aligned.loc[direct_fill_mask, keep_cols] = by_name.reindex(peak_index[direct_fill_mask])[keep_cols].to_numpy()
+
+    if {"Name", "PeakId"}.issubset(consensus_df.columns):
+        name_to_peakid = (
+            consensus_df[["Name", "PeakId"]]
+            .dropna(subset=["Name", "PeakId"])
+            .drop_duplicates(subset=["Name"], keep="last")
+            .set_index("Name")["PeakId"]
+        )
+        peakid_to_name = (
+            consensus_df[["Name", "PeakId"]]
+            .dropna(subset=["Name", "PeakId"])
+            .drop_duplicates(subset=["PeakId"], keep="last")
+            .set_index("PeakId")["Name"]
+        )
+
+        if peakid_col is not None:
+            by_peakid = shape_df[[peakid_col, *keep_cols]].dropna(subset=[peakid_col]).drop_duplicates(
+                subset=[peakid_col], keep="last"
+            ).set_index(peakid_col)
+            missing_mask = aligned[keep_cols].isna().all(axis=1)
+            if missing_mask.any():
+                mapped_peakids = name_to_peakid.reindex(peak_index[missing_mask])
+                aligned.loc[missing_mask, keep_cols] = by_peakid.reindex(mapped_peakids.to_numpy())[keep_cols].to_numpy()
+
+        if name_col is not None:
+            by_name = shape_df[[name_col, *keep_cols]].dropna(subset=[name_col]).drop_duplicates(
+                subset=[name_col], keep="last"
+            ).set_index(name_col)
+            missing_mask = aligned[keep_cols].isna().all(axis=1)
+            if missing_mask.any():
+                mapped_names = peakid_to_name.reindex(peak_index[missing_mask])
+                aligned.loc[missing_mask, keep_cols] = by_name.reindex(mapped_names.to_numpy())[keep_cols].to_numpy()
+
+    matched = int(aligned[keep_cols].notna().any(axis=1).sum())
+    logging.info("Shape prior merge matched %d/%d peaks from %s", matched, len(aligned), shape_tsv)
+    if matched == 0:
+        logging.warning("No shape prior rows aligned to consensus peaks; weighted BH will use default ShapeZ=0")
+
+    return aligned
+
+
 def weighted_bh(p_values, weights, alpha=0.05):
     """
     p_values: raw p-values (unchanged)
@@ -1363,7 +1486,15 @@ def run_pipeline(
         )
     raw_counts.rename(columns={matched_chrom: "Chromosome"}, inplace=True)
 
-    consensus_df = consensus.df.rename(columns={"Start": "start", "End": "end"})
+    consensus_df = consensus.df.copy()
+    consensus_df["PeakId"] = (
+        consensus_df["Chromosome"].astype(str)
+        + ":"
+        + consensus_df["Start"].astype(int).astype(str)
+        + "-"
+        + consensus_df["End"].astype(int).astype(str)
+    )
+    consensus_df = consensus_df.rename(columns={"Start": "start", "End": "end"})
     merged = raw_counts.merge(consensus_df[["Chromosome", "start", "end", "Name"]],
                               on=["Chromosome", "start", "end"], how="left")
     merged["Peak"] = merged["Name"].fillna(
@@ -1388,6 +1519,16 @@ def run_pipeline(
     counts_df = counts_df[[s.sample for s in samples]]
 
     prior_covariates = pd.DataFrame(index=counts_df.index)
+
+    shape_tsv_value = getattr(args, "shape_tsv", None)
+    if shape_tsv_value:
+        shape_path = Path(shape_tsv_value)
+        if shape_path.exists():
+            shape_covariates = load_shape_covariates(shape_path, counts_df.index, consensus_df)
+            if not shape_covariates.empty:
+                prior_covariates = prior_covariates.join(shape_covariates, how="left")
+        else:
+            logging.warning("Shape TSV not found: %s (skip external shape prior merge)", shape_path)
     if prior_registry.enabled:
         consensus_prior_weights = prior_registry.get_consensus_weights(counts_df.index)
         # Preserve continuous prior covariates (not only boolean overlap) so
@@ -1412,12 +1553,13 @@ def run_pipeline(
                 )
                 peak_id_table = peak_id_table.set_index("PeakId")
 
-                prior_covariates = name_table.reindex(counts_df.index)
-                missing_mask = prior_covariates[available].isna().all(axis=1)
+                registry_covariates = name_table.reindex(counts_df.index)
+                missing_mask = registry_covariates[available].isna().all(axis=1)
                 if missing_mask.any():
-                    prior_covariates.loc[missing_mask, available] = peak_id_table.reindex(
+                    registry_covariates.loc[missing_mask, available] = peak_id_table.reindex(
                         counts_df.index[missing_mask]
                     )[available].to_numpy()
+                prior_covariates = prior_covariates.join(registry_covariates, how="left")
 
         consensus_intensity = prior_registry.compute_consensus_intensity_z(consensus.df)
         if not consensus_intensity.empty:
@@ -1476,6 +1618,9 @@ def run_pipeline(
             "PriorOverlap",
             "PriorIntensity",
             "IntZ",
+            "PriorShapeDeviation",
+            "PriorShapeCategory",
+            "ShapeZ",
             "prior_weight",
             "p_weighted",
             "q_weighted",
@@ -1675,6 +1820,10 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--prior-bed", help="BED file describing prior peaks")
     parser.add_argument("--prior-bigwig", help="bigWig of reference signal intensities for priors")
     parser.add_argument("--prior-manifest", help="Manifest (JSON or key=value) describing prior resources")
+    parser.add_argument(
+        "--shape-tsv",
+        help="Optional peakshape result TSV used as external shape prior covariate for weighted FDR",
+    )
     parser.add_argument(
         "--prior-weight",
         type=float,
