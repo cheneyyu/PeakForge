@@ -1531,6 +1531,26 @@ def build_runmode_samples(args: argparse.Namespace) -> List[SampleEntry]:
     return samples
 
 
+def write_sample_sheet(samples: Sequence[SampleEntry], output_path: Path) -> Path:
+    """Export sample metadata as TSV/CSV based on output extension."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sep = "\t" if output_path.suffix.lower() != ".csv" else ","
+    frame = pd.DataFrame(
+        [
+            {
+                "sample": sample.sample,
+                "condition": sample.condition,
+                "bam": str(sample.bam),
+                "peaks": str(sample.peaks) if sample.peaks else "",
+                "peak_type": sample.peak_type,
+            }
+            for sample in samples
+        ]
+    )
+    frame.to_csv(output_path, sep=sep, index=False)
+    return output_path
+
+
 def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", default="results", help="Output directory")
     parser.add_argument("--peak-dir", default="peaks", help="Directory for peak calls")
@@ -1631,6 +1651,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     peak_shape.add_cli_arguments(peakshape_parser)
 
+    sheet_parser = subparsers.add_parser(
+        "makesheet",
+        help="Generate a metadata TSV/CSV from runmode-style arguments",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    sheet_parser.add_argument("--condition-a", required=True, help="First condition label")
+    sheet_parser.add_argument("--a-bams", nargs="+", required=True, help="BAM files for condition A")
+    sheet_parser.add_argument(
+        "--a-peaks",
+        nargs="*",
+        default=None,
+        help="Optional peak files aligned with --a-bams",
+    )
+    sheet_parser.add_argument("--condition-b", required=True, help="Second condition label")
+    sheet_parser.add_argument("--b-bams", nargs="+", required=True, help="BAM files for condition B")
+    sheet_parser.add_argument(
+        "--b-peaks",
+        nargs="*",
+        default=None,
+        help="Optional peak files aligned with --b-bams",
+    )
+    sheet_parser.add_argument(
+        "--output",
+        required=True,
+        help="Output metadata file path (.tsv recommended, .csv supported)",
+    )
+    sheet_parser.add_argument("--log-level", default="INFO", help="Logging level")
+
     return parser
 
 
@@ -1656,6 +1704,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         elif args.command == "runmode":
             samples = build_runmode_samples(args)
             run_pipeline(args, samples=samples, metadata_path=None)
+        elif args.command == "makesheet":
+            samples = build_runmode_samples(args)
+            output_path = write_sample_sheet(samples, Path(args.output))
+            logging.info("Metadata sheet written to %s", output_path)
         elif args.command == "peakshape":
             peak_shape.run_peak_shape(args)
         else:  # pragma: no cover - defensive guard
