@@ -636,12 +636,18 @@ def benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
 
 
 def compute_prior_score(df):
-    """
-    Compute unified prior score from available covariates.
+    """Build a unified prior score from covariates used by weighted BH.
 
-    Keep compatibility with historical inputs that only provide boolean
-    ``PriorOverlap`` while preferring continuous covariates when present.
-    Returns a numpy array S_i: unified prior scores.
+    Covariate groups are intentionally separated:
+      1) Matching/similarity covariates from prior overlap context
+         (``PriorWeight``, ``NoveltyPenalty``, ``PriorOverlap`` fallback).
+      2) Deviation-from-prior-distribution covariates
+         (``IntZ`` from prior bigWig, ``ShapeZ`` from shape priors).
+
+    These inputs are combined into ``S_i`` and later mapped to final weighted-BH
+    quantities (``prior_weight``, ``p_weighted``, ``q_weighted``). Raw ``pvalue``
+    and ``log2FoldChange`` are *not* modified here.
+
     Default formula:
         S_i = 2.0 * PriorWeight
               - 1.0 * NoveltyPenalty
@@ -841,13 +847,26 @@ def load_shape_covariates(shape_tsv: Path, peak_index: pd.Index, consensus_df: p
 
 
 def weighted_bh(p_values, weights, alpha=0.05):
-    """
-    p_values: raw p-values (unchanged)
-    weights: normalized weights from compute_prior_weights
-    Returns:
-        p_weighted: p / w   (clipped at 1)
-        q_weighted: BH-adjusted q-values on p_weighted
-        significant: boolean array for FDR alpha
+    """Weighted Benjamini-Hochberg over raw p-values.
+
+    Parameters
+    ----------
+    p_values
+        Raw p-values from differential testing (input values are unchanged).
+    weights
+        Positive per-peak weighted-FDR multipliers from ``compute_prior_weights``.
+
+    Returns
+    -------
+    p_weighted
+        ``p / w`` (clipped to [0, 1]) used as BH input.
+    q_weighted
+        BH-adjusted q-values computed on ``p_weighted``.
+    significant
+        Boolean mask ``q_weighted <= alpha``.
+
+    Note: this step affects multiple-testing ranking/significance only;
+    raw ``log2FoldChange`` and raw ``pvalue`` columns remain untouched.
     """
 
     pvals = np.asarray(p_values, dtype=float)
@@ -1360,6 +1379,9 @@ def run_pipeline(
             path = (manifest_dir / path).expanduser()
         return path
 
+    # Prior resources feed three layers: (a) matching covariates from BED overlap,
+    # (b) distribution-deviation covariates such as IntZ/ShapeZ, and (c) final
+    # weighted-BH outputs computed later from the combined covariates.
     prior_bed_path = _normalise_path(getattr(args, "prior_bed", None))
     if prior_bed_path is None:
         prior_bed_path = _normalise_path(_manifest_lookup("prior_bed", "bed", "peaks"))
@@ -1600,6 +1622,9 @@ def run_pipeline(
         if "ShapeZ" not in prior_adjusted.columns:
             prior_adjusted["ShapeZ"] = 0.0
 
+        # Final weighted multiple-testing layer: these are *not* the same as
+        # registry-level PriorWeight (matching covariate). The output ``prior_weight``
+        # below is the normalized weighted-BH multiplier derived from all covariates.
         weights = compute_prior_weights(prior_adjusted)
         p_weighted, q_weighted, sig = weighted_bh(
             prior_adjusted["pvalue"].to_numpy(), weights, alpha=0.05
@@ -1828,7 +1853,10 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         "--prior-weight",
         type=float,
         default=0.3,
-        help="Strength of the prior regularisation (0 disables influence)",
+        help=(
+            "Global prior influence for covariate construction and weighted-BH "
+            "reweighting only (does not change raw log2FC or raw p-values; 0 disables)"
+        ),
     )
     parser.add_argument(
         "--threads",
