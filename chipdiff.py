@@ -16,13 +16,20 @@ Optional columns:
     peaks    Path to an existing peak file (narrowPeak or broadPeak)
     peak_type    One of {auto, narrow, broad}.  ``auto`` (default)
                  attempts to infer the peak type from the file name.
+                 Use ``narrow`` for punctate enrichments (e.g., TF/CUT&Tag
+                 factor peaks) and ``broad`` for diffuse domains (e.g.,
+                 many histone-mark ChIP-seq datasets).
 
 Example TSV sample sheet::
 
     sample  condition   bam                 peaks               peak_type
-    S1      treated     data/S1.bam         data/S1_peaks.bed   narrow
-    S2      treated     data/S2.bam         -                   -
-    C1      control     data/C1.bam         data/C1_broad.bed   broad
+    T1      treated     data/T1.bam         data/T1_peaks.narrowPeak   narrow
+    T2      treated     data/T2.bam         data/T2_peaks.narrowPeak   narrow
+    C1      control     data/C1.bam         data/C1_peaks.narrowPeak   narrow
+    C2      control     data/C2.bam         data/C2_peaks.narrowPeak   narrow
+
+For a single analysis, using a consistent peak type across samples is
+recommended.
 
 The pipeline performs the following steps:
 
