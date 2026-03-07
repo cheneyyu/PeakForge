@@ -637,17 +637,29 @@ def benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
 
 def compute_prior_score(df):
     """
-    df has columns PriorOverlap, IntZ, ShapeZ.
+    Compute unified prior score from available covariates.
+
+    Keep compatibility with historical inputs that only provide boolean
+    ``PriorOverlap`` while preferring continuous covariates when present.
     Returns a numpy array S_i: unified prior scores.
-    Recommended formula:
-        S_i = beta1 * PriorOverlap
-              - beta2 * abs(IntZ)
-              - beta3 * abs(ShapeZ)
+    Default formula:
+        S_i = 2.0 * PriorWeight
+              - 1.0 * NoveltyPenalty
+              - 0.5 * abs(IntZ)
+              - 0.5 * abs(ShapeZ)
+
+    If ``PriorWeight`` is not available, fall back to:
+        S_i = 2.0 * PriorOverlap
+              - 0.5 * abs(IntZ)
+              - 0.5 * abs(ShapeZ)
+
     with clipping of |z| at 4.
-    beta1=2.0, beta2=1.0, beta3=1.0 are fine defaults.
     """
 
-    beta1, beta2, beta3 = 2.0, 1.0, 1.0
+    beta_prior = 2.0
+    beta_novelty = 1.0
+    beta_int = 0.5
+    beta_shape = 0.5
 
     def _extract(column: str) -> np.ndarray:
         if column in df:
@@ -655,11 +667,22 @@ def compute_prior_score(df):
             return series.to_numpy(dtype=float)
         return np.zeros(len(df), dtype=float)
 
-    overlap = _extract("PriorOverlap")
+    if "PriorWeight" in df:
+        prior_signal = _extract("PriorWeight")
+    else:
+        # Backward-compatible fallback for historical runs that only tracked
+        # overlap as a binary indicator.
+        prior_signal = _extract("PriorOverlap")
+    novelty_penalty = _extract("NoveltyPenalty")
     int_z = np.clip(np.abs(_extract("IntZ")), 0, 4)
     shape_z = np.clip(np.abs(_extract("ShapeZ")), 0, 4)
 
-    return beta1 * overlap - beta2 * int_z - beta3 * shape_z
+    return (
+        beta_prior * prior_signal
+        - beta_novelty * novelty_penalty
+        - beta_int * int_z
+        - beta_shape * shape_z
+    )
 
 
 def compute_prior_weights(df, gamma=0.5):
@@ -1364,8 +1387,37 @@ def run_pipeline(
         raise ValueError(f"Counts matrix missing columns for samples: {', '.join(missing_cols)}")
     counts_df = counts_df[[s.sample for s in samples]]
 
+    prior_covariates = pd.DataFrame(index=counts_df.index)
     if prior_registry.enabled:
         consensus_prior_weights = prior_registry.get_consensus_weights(counts_df.index)
+        # Preserve continuous prior covariates (not only boolean overlap) so
+        # downstream weighted FDR uses the signal computed in PriorRegistry.
+        consensus_table = prior_registry.consensus_table
+        if consensus_table is not None and not consensus_table.empty:
+            prior_columns = [
+                "PriorWeight",
+                "NoveltyPenalty",
+                "WidthZ",
+                "OverlapCount",
+                "PriorOverlap",
+            ]
+            available = [column for column in prior_columns if column in consensus_table.columns]
+            if available:
+                name_table = consensus_table[["Name", *available]].copy()
+                name_table = name_table.dropna(subset=["Name"]).drop_duplicates(subset=["Name"], keep="last")
+                name_table = name_table.set_index("Name")
+                peak_id_table = consensus_table[["PeakId", *available]].copy()
+                peak_id_table = peak_id_table.dropna(subset=["PeakId"]).drop_duplicates(
+                    subset=["PeakId"], keep="last"
+                )
+                peak_id_table = peak_id_table.set_index("PeakId")
+
+                prior_covariates = name_table.reindex(counts_df.index)
+                missing_mask = prior_covariates[available].isna().all(axis=1)
+                if missing_mask.any():
+                    prior_covariates.loc[missing_mask, available] = peak_id_table.reindex(
+                        counts_df.index[missing_mask]
+                    )[available].to_numpy()
     else:
         consensus_prior_weights = pd.Series(0.0, index=counts_df.index, dtype=float)
 
@@ -1375,6 +1427,8 @@ def run_pipeline(
     prior_adjusted: Optional[pd.DataFrame] = None
     if not diff_res.empty:
         prior_adjusted = diff_res.copy()
+        if not prior_covariates.empty:
+            prior_adjusted = prior_adjusted.join(prior_covariates, how="left")
         if "PriorOverlap" not in prior_adjusted.columns:
             prior_adjusted["PriorOverlap"] = consensus_prior_weights > 0
         if "IntZ" not in prior_adjusted.columns:
@@ -1392,10 +1446,20 @@ def run_pipeline(
         prior_adjusted["q_weighted"] = q_weighted
         prior_adjusted["significant"] = sig
 
-        diff_res["prior_weight"] = prior_adjusted["prior_weight"]
-        diff_res["p_weighted"] = prior_adjusted["p_weighted"]
-        diff_res["q_weighted"] = prior_adjusted["q_weighted"]
-        diff_res["significant"] = prior_adjusted["significant"]
+        retained_prior_columns = [
+            "PriorWeight",
+            "NoveltyPenalty",
+            "WidthZ",
+            "OverlapCount",
+            "PriorOverlap",
+            "prior_weight",
+            "p_weighted",
+            "q_weighted",
+            "significant",
+        ]
+        for column in retained_prior_columns:
+            if column in prior_adjusted.columns:
+                diff_res[column] = prior_adjusted[column]
 
     diff_path = results_dir / "differential_results.tsv"
     diff_res.to_csv(diff_path, sep="\t")
