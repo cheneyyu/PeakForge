@@ -72,7 +72,15 @@ class _ShapeStat:
 
 
 class PriorRegistry:
-    """Utility class that coordinates the use of public priors."""
+    """Utility class that coordinates external priors and prior-derived covariates.
+
+    The registry exposes **matching/similarity covariates** used upstream of weighted FDR,
+    including ``PriorWeight`` and ``NoveltyPenalty`` from BED overlap and width context.
+    Additional **distribution-deviation covariates** (for example ``IntZ`` from bigWig
+    intensity and ``ShapeZ`` from shape statistics) are computed elsewhere and merged later.
+    Final multiple-testing weights (``prior_weight``/``p_weighted``/``q_weighted``) are
+    produced in ``chipdiff.py`` and intentionally kept separate from registry fields.
+    """
 
     def __init__(
         self,
@@ -392,6 +400,10 @@ class PriorRegistry:
             overlap_count = counts_df["NumberOverlaps"].reindex(base.index).fillna(0).astype(int)
             overlap = overlap_count > 0
 
+        # Similarity/matching covariates derived from BED context:
+        # - PriorWeight: overlap-aware support strength in [0, self.weight]
+        # - NoveltyPenalty: penalty for non-overlapping peaks with unusual width
+        # - WidthZ: signed deviation from prior BED width distribution
         abs_z = np.abs(width_z.fillna(0.0).to_numpy())
         novelty_penalty_values = np.clip(abs_z, 0, 6) * self.weight
         novelty_penalty_values = np.where(overlap.to_numpy(), 0.0, novelty_penalty_values)

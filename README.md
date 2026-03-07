@@ -246,25 +246,45 @@ threading controls, annotation, enrichment, priors, and metadata-sheet helpers (
 
 ## Optional priors (current behaviour)
 
-Priors are supported but intentionally conservative in the current release:
+Priors are used as **external covariates** for weighted multiple-testing correction, not as replacements for core differential statistics.
 
-- **What gets loaded** – You can pass a BED (`--prior-bed`), bigWig (`--prior-bigwig`), and shape statistics table
-  (`--prior-stats`), either directly or through `--prior-manifest`. The registry records width distributions, optional
-  intensity summaries, and shape statistics for later plotting.
+### What priors do (and do not do)
+- Priors **do not** modify raw `log2FoldChange`.
+- Priors **do not** modify raw `pvalue`.
+- Priors **do** affect weighted BH outputs (`prior_weight`, `p_weighted`, `q_weighted`), which can change ranking and significance calls.
 
-- **How they are applied** – The BED overlap determines `PriorOverlap` and a per-peak `PriorWeight` (with a novelty penalty for
-  unusually wide novel peaks). During differential testing, those overlap-aware weights are blended with any per-peak `IntZ`
-  (intensity z) and `ShapeZ` (shape z) columns to form a unified score; the score is standardised, exponentiated, normalised to
-  mean 1, and fed into the weighted Benjamini–Hochberg procedure (`prior_weight`, `p_weighted`, `q_weighted`). Log fold-changes
-  and raw p-values are not directly altered.
+### Prior inputs and their roles
+- `--prior-bed`: provides overlap/matching information and width context, producing covariates such as `PriorWeight`, `NoveltyPenalty`, and `WidthZ`.
+- `--prior-bigwig`: provides reference signal intensity context, yielding per-peak `PriorIntensity` and `IntZ`.
+- `--shape-tsv`: provides external peak-shape covariates aligned to consensus peaks (for example `ShapeZ`).
+- `--prior-manifest`: bundles prior resources (commonly `prior_bed`, `prior_bigwig`, `prior_stats`, `prior_weight`) into one reusable config.
 
-- **Why use them** – Overlap with a trusted catalogue down-weights p-values for familiar loci, while high-magnitude
-  intensity/shape deviations (if supplied) push weights back toward 1, reducing over-confidence in discordant peaks. QC
-  artefacts are still summarised (distributions, KDE plots, overlap tables), but the priors also influence multiple-testing
-  correction through the weighting scheme rather than serving purely as quality checks.
+### Minimal prior usage example
+```bash
+./peakforge tsvmode example/data/metadata_1v1.tsv \
+  --output-dir results/prior_demo \
+  --prior-bed results/prior_demo/prior_inputs/demo_prior.bed \
+  --prior-bigwig results/prior_demo/prior_inputs/demo_prior.bw \
+  --shape-tsv results/prior_demo/shape/peak_shape_summary.tsv \
+  --prior-weight 0.4
+```
 
-To ship a reusable prior bundle, place the files next to a `prior_manifest.json` containing the keys `prior_bed`,
-`prior_bigwig`, `prior_stats`, and `prior_weight`. `example/run_with_prior.sh` demonstrates this layout end-to-end.
+### When should I use priors?
+Priors are most useful when external evidence exists for where true regulatory signal is likely to occur, especially in low-replicate or borderline-significance settings. Suitable priors should be as close as possible to the current analysis in assay type, cell or tissue context, genome build, and biological state.
+
+### What makes a good prior?
+The best priors are assay-matched and context-matched reference regions, such as public ATAC-seq peaks for ATAC-seq analyses, or matched CUT&Tag / ChIP peaks for the same target. DNase-seq peaks can also be used as a weaker prior for ATAC-seq because both assays capture open chromatin, but assay-matched ATAC priors are preferred.
+
+### Can CUT&Tag priors be used for ATAC-seq?
+Sometimes. CUT&Tag priors are most reasonable when the profiled mark or factor is expected to co-localize with accessible regulatory elements, such as active promoter/enhancer marks. They should be used cautiously and interpreted as functional-regulatory priors rather than generic accessibility priors.
+
+### Should priors come from treatment or control samples?
+In most cases, priors should be neutral and not strongly biased toward one comparison arm. We recommend using pooled, consensus, or independent reference peak sets rather than priors derived exclusively from only treatment or only control samples.
+
+### What priors do not do
+Priors in PeakForge do not modify the raw log2 fold-change or the raw p-value. Instead, priors are used as external covariates for weighted multiple-testing correction, which can improve ranking and prioritization of peaks supported by prior knowledge.
+
+To ship a reusable prior bundle, place files next to a `prior_manifest.json` with keys such as `prior_bed`, `prior_bigwig`, `prior_stats`, and `prior_weight`. `example/run_with_prior.sh` demonstrates this layout end-to-end.
 
 ---
 
