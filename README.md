@@ -74,6 +74,29 @@ environment.
 2. Run the pipeline: `./peakforge tsvmode samples.tsv --output-dir results` (or `python chipdiff.py tsvmode ...`).
 3. Review tables, plots, and metadata under `results/`.
 
+### Easier metadata generation (new)
+
+If hand-writing CSV/TSV feels tedious, you can now generate it directly from run arguments:
+
+```bash
+./peakforge makesheet \
+  --condition-a K562 \
+  --a-bams example/data/K562_rep1.bam example/data/K562_rep2.bam \
+  --a-peaks example/results/broad/K562_rep1_peaks.broadPeak example/results/broad/K562_rep2_peaks.broadPeak \
+  --condition-b HepG2 \
+  --b-bams example/data/HepG2_rep1.bam example/data/HepG2_rep2.bam \
+  --b-peaks example/results/broad/HepG2_rep1_peaks.broadPeak example/results/broad/HepG2_rep2_peaks.broadPeak \
+  --output samples.tsv
+```
+
+Then run as usual:
+
+```bash
+./peakforge tsvmode samples.tsv --output-dir results
+```
+
+`makesheet` supports both `.tsv` and `.csv` output paths and auto-generates unique sample IDs from BAM filenames.
+
 ### Sample sheet format
 
 The sheet can be tab- or comma-delimited and must include `sample`, `condition`, and `bam`. Optional columns let you
@@ -217,7 +240,7 @@ fold-change estimates directly comparable.
 
 ## Command reference
 Run `./peakforge --help` (or `python chipdiff.py --help`) to inspect CLI options including peak-calling parameters,
-threading controls, annotation, enrichment, and prior configuration.
+threading controls, annotation, enrichment, priors, and metadata-sheet helpers (`makesheet`).
 
 ---
 
