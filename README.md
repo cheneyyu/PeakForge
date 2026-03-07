@@ -95,6 +95,8 @@ Then run as usual:
 ./peakforge tsvmode samples.tsv --output-dir results
 ```
 
+If you want to run immediately without preparing metadata first, use `runmode` (see [Running without a sample sheet (`runmode`)](#running-without-a-sample-sheet-runmode)).
+
 `makesheet` supports both `.tsv` and `.csv` output paths and auto-generates unique sample IDs from BAM filenames.
 
 ### Sample sheet format
@@ -137,6 +139,31 @@ invoked in narrow- or broad-peak mode when peaks are missing; narrow peaks are e
 padding. Paired-end BAMs are detected automatically and passed to MACS2 with `BAMPE` format. If you supply `narrowPeak`
 or `broadPeak` files in the sample sheet, PeakForge infers the mode from the extension and you can omit `--peak-type`
 entirely. `--threads` applies to deepTools counting and to any `samtools index` calls needed to compute library sizes.
+
+## Running without a sample sheet (`runmode`)
+
+`runmode` runs the same analysis pipeline as `tsvmode`, but takes condition labels and file lists directly on the command line instead of reading a metadata sheet.
+
+Use `runmode` for ad hoc runs, quick checks, or shell-scripted analyses. Use `tsvmode` when you want an explicit, reusable, metadata-driven workflow that is easy to share and rerun.
+
+Argument mapping is 1:1 with sample-sheet concepts:
+- `--condition-a` / `--condition-b` map to the `condition` column.
+- `--a-bams` / `--b-bams` map to per-condition `bam` entries.
+- `--a-peaks` / `--b-peaks` (optional) map to per-condition `peaks` entries.
+
+When provided, `--a-peaks` and `--b-peaks` must be in the same order as their BAM lists. Sample IDs are auto-generated from BAM filenames in `runmode`. If you decide to keep a run for future reuse, `makesheet` can generate a `.tsv`/`.csv` sheet from the same style of arguments.
+
+```bash
+./peakforge runmode \
+  --condition-a K562 \
+  --a-bams example/data/K562_rep1.bam example/data/K562_rep2.bam \
+  --a-peaks example/results/2v2/peaks/K562_rep1_peaks.narrowPeak example/results/2v2/peaks/K562_rep2_peaks.narrowPeak \
+  --condition-b HepG2 \
+  --b-bams example/data/HepG2_rep1.bam example/data/HepG2_rep2.bam \
+  --b-peaks example/results/2v2/peaks/HepG2_rep1_peaks.narrowPeak example/results/2v2/peaks/HepG2_rep2_peaks.narrowPeak \
+  --consensus-peaks example/results/2v2/consensus_peaks.bed \
+  --output-dir results/runmode_2v2
+```
 
 ---
 
@@ -190,10 +217,10 @@ bash example/run_example2.sh \
   --b-peaks example/results/2v2/peaks/HepG2_rep1_peaks.narrowPeak example/results/2v2/peaks/HepG2_rep2_peaks.narrowPeak \
   --consensus-peaks example/results/2v2/consensus_peaks.bed
 ```
-Skips MACS2 when peaks are provided and reuses consensus intervals for consistent comparisons. The helper ultimately
-invokes `python chipdiff.py runmode` with the supplied arguments plus `--peak-type narrow --peak-extension 250
---min-overlap 2 --macs2-genome hs --threads 16`, so you can copy/paste the expanded command if you prefer to run
-PeakForge directly.
+Skips MACS2 when peaks are provided and reuses consensus intervals for consistent comparisons. See [Running without a
+sample sheet (`runmode`)](#running-without-a-sample-sheet-runmode) for when to prefer `runmode` vs `tsvmode` and how
+its arguments map to sample-sheet fields. The helper ultimately invokes `python chipdiff.py runmode` with the supplied
+arguments plus `--peak-type narrow --peak-extension 250 --min-overlap 2 --macs2-genome hs --threads 16`.
 
 ### Prior-aware demo
 ```bash
@@ -269,20 +296,35 @@ Priors are used as **external covariates** for weighted multiple-testing correct
   --prior-weight 0.4
 ```
 
-### When should I use priors?
-Priors are most useful when external evidence exists for where true regulatory signal is likely to occur, especially in low-replicate or borderline-significance settings. Suitable priors should be as close as possible to the current analysis in assay type, cell or tissue context, genome build, and biological state.
+## Choosing priors
 
-### What makes a good prior?
-The best priors are assay-matched and context-matched reference regions, such as public ATAC-seq peaks for ATAC-seq analyses, or matched CUT&Tag / ChIP peaks for the same target. DNase-seq peaks can also be used as a weaker prior for ATAC-seq because both assays capture open chromatin, but assay-matched ATAC priors are preferred.
+Priors are optional. They are most helpful when sample size is small, when many peaks are borderline, or when you have strong external evidence about likely regulatory loci.
 
-### Can CUT&Tag priors be used for ATAC-seq?
-Sometimes. CUT&Tag priors are most reasonable when the profiled mark or factor is expected to co-localize with accessible regulatory elements, such as active promoter/enhancer marks. They should be used cautiously and interpreted as functional-regulatory priors rather than generic accessibility priors.
+Choose priors that match your analysis as closely as possible:
+- Same assay is preferred.
+- Same genome build is strongly recommended.
+- Same (or closely related) cell/tissue context is preferred.
+- Similar biological state is preferred.
 
-### Should priors come from treatment or control samples?
-In most cases, priors should be neutral and not strongly biased toward one comparison arm. We recommend using pooled, consensus, or independent reference peak sets rather than priors derived exclusively from only treatment or only control samples.
+Cross-assay guidance:
+- DNase-seq can be used as a weak prior for ATAC-seq because both assays report open chromatin.
+- For ATAC analyses, assay-matched ATAC priors are preferred over DNase priors.
+- CUT&Tag/ChIP priors for ATAC should be used only when the mark/factor is expected to co-localize with accessible regulatory elements.
+- Repressive marks should not be used as generic ATAC priors.
 
-### What priors do not do
-Priors in PeakForge do not modify the raw log2 fold-change or the raw p-value. Instead, priors are used as external covariates for weighted multiple-testing correction, which can improve ranking and prioritization of peaks supported by prior knowledge.
+Condition choice:
+- Prefer neutral, pooled, consensus, or independent reference priors.
+- Avoid priors derived exclusively from only treatment or only control unless you intentionally want a directional prior.
+
+What priors do **not** do:
+- They do **not** modify raw `log2FoldChange`.
+- They do **not** modify raw `pvalue`.
+- They act as external covariates for weighted multiple-testing correction/ranking.
+
+Quick triage:
+- **Good prior:** assay-matched, same build, related context/state, neutral reference source.
+- **Use with caution:** DNase for ATAC, or CUT&Tag/ChIP marks with plausible accessibility co-localization.
+- **Avoid by default:** priors from incompatible genome builds, unrelated contexts, strongly arm-biased sets, or repressive marks as generic ATAC priors.
 
 To ship a reusable prior bundle, place files next to a `prior_manifest.json` with keys such as `prior_bed`, `prior_bigwig`, `prior_stats`, and `prior_weight`. `example/run_with_prior.sh` demonstrates this layout end-to-end.
 
