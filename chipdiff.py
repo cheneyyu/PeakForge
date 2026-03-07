@@ -1418,6 +1418,28 @@ def run_pipeline(
                     prior_covariates.loc[missing_mask, available] = peak_id_table.reindex(
                         counts_df.index[missing_mask]
                     )[available].to_numpy()
+
+        consensus_intensity = prior_registry.compute_consensus_intensity_z(consensus.df)
+        if not consensus_intensity.empty:
+            intensity_cols = ["PriorIntensity", "IntZ"]
+            intensity_name_table = consensus_intensity[["Name", *intensity_cols]].copy()
+            intensity_name_table = intensity_name_table.dropna(subset=["Name"]).drop_duplicates(
+                subset=["Name"], keep="last"
+            )
+            intensity_name_table = intensity_name_table.set_index("Name")
+            intensity_peakid_table = consensus_intensity[["PeakId", *intensity_cols]].copy()
+            intensity_peakid_table = intensity_peakid_table.dropna(subset=["PeakId"]).drop_duplicates(
+                subset=["PeakId"], keep="last"
+            )
+            intensity_peakid_table = intensity_peakid_table.set_index("PeakId")
+
+            intensity_covariates = intensity_name_table.reindex(counts_df.index)
+            missing_mask = intensity_covariates[intensity_cols].isna().all(axis=1)
+            if missing_mask.any():
+                intensity_covariates.loc[missing_mask, intensity_cols] = intensity_peakid_table.reindex(
+                    counts_df.index[missing_mask]
+                )[intensity_cols].to_numpy()
+            prior_covariates = prior_covariates.join(intensity_covariates, how="left")
     else:
         consensus_prior_weights = pd.Series(0.0, index=counts_df.index, dtype=float)
 
@@ -1452,6 +1474,8 @@ def run_pipeline(
             "WidthZ",
             "OverlapCount",
             "PriorOverlap",
+            "PriorIntensity",
+            "IntZ",
             "prior_weight",
             "p_weighted",
             "q_weighted",

@@ -247,6 +247,112 @@ class PriorRegistry:
             except Exception:  # pragma: no cover - best effort
                 pass
 
+    def compute_consensus_intensity_z(self, consensus_peaks: pd.DataFrame) -> pd.DataFrame:
+        """Compute per-consensus-peak prior intensity and z-score from ``prior_bigwig``.
+
+        The returned frame always contains ``Name``, ``PeakId``, ``PriorIntensity`` and
+        ``IntZ`` columns. When bigWig support is unavailable, intensity columns are filled
+        with ``NaN`` to keep downstream merges stable.
+        """
+
+        required = {"Chromosome", "Start", "End", "Name"}
+        if consensus_peaks.empty or not required.issubset(consensus_peaks.columns):
+            return pd.DataFrame(columns=["Name", "PeakId", "PriorIntensity", "IntZ"])
+
+        base = consensus_peaks[["Chromosome", "Start", "End", "Name"]].copy().reset_index(drop=True)
+        base["Start"] = pd.to_numeric(base["Start"], errors="coerce")
+        base["End"] = pd.to_numeric(base["End"], errors="coerce")
+        base["PeakId"] = (
+            base["Chromosome"].astype(str)
+            + ":"
+            + base["Start"].fillna(-1).astype(int).astype(str)
+            + "-"
+            + base["End"].fillna(-1).astype(int).astype(str)
+        )
+        base["PriorIntensity"] = np.nan
+        base["IntZ"] = np.nan
+
+        if self.prior_bigwig_path is None:
+            return base[["Name", "PeakId", "PriorIntensity", "IntZ"]]
+        if pyBigWig is None:
+            LOGGER.warning(
+                "pyBigWig not installed; cannot compute per-peak prior intensity from %s",
+                self.prior_bigwig_path,
+            )
+            return base[["Name", "PeakId", "PriorIntensity", "IntZ"]]
+
+        try:
+            handle = pyBigWig.open(str(self.prior_bigwig_path))
+        except Exception as exc:  # pragma: no cover - IO heavy
+            LOGGER.warning("Failed to open prior bigWig %s: %s", self.prior_bigwig_path, exc)
+            return base[["Name", "PeakId", "PriorIntensity", "IntZ"]]
+
+        try:
+            chrom_sizes = handle.chroms() or {}
+            if not chrom_sizes:
+                LOGGER.warning("Prior bigWig %s has no chromosome size metadata", self.prior_bigwig_path)
+                return base[["Name", "PeakId", "PriorIntensity", "IntZ"]]
+
+            values: List[float] = []
+            success = 0
+            for _, row in base.iterrows():
+                chrom = str(row["Chromosome"])
+                start_raw = row["Start"]
+                end_raw = row["End"]
+                value = math.nan
+                if (
+                    chrom in chrom_sizes
+                    and pd.notna(start_raw)
+                    and pd.notna(end_raw)
+                ):
+                    chrom_end = int(chrom_sizes[chrom])
+                    start = max(0, int(start_raw))
+                    end = min(max(start + 1, int(end_raw)), chrom_end)
+                    if end > start:
+                        try:
+                            stat = handle.stats(chrom, start, end, nBins=1, exact=True)[0]
+                        except Exception:
+                            stat = None
+                        if isinstance(stat, (float, int)) and not math.isnan(float(stat)):
+                            value = float(stat)
+                            success += 1
+                values.append(value)
+
+            base["PriorIntensity"] = pd.Series(values, dtype=float)
+            LOGGER.info(
+                "Computed prior intensity for %d/%d consensus peaks from %s",
+                success,
+                len(base),
+                self.prior_bigwig_path,
+            )
+        finally:
+            try:
+                handle.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+
+        mean = self.distributions.get("intensity_mean")
+        std = self.distributions.get("intensity_std")
+        try:
+            mean_value = float(mean) if mean is not None else math.nan
+        except (TypeError, ValueError):
+            mean_value = math.nan
+        try:
+            std_value = float(std) if std is not None else math.nan
+        except (TypeError, ValueError):
+            std_value = math.nan
+
+        if not np.isfinite(std_value) or std_value == 0 or not np.isfinite(mean_value):
+            LOGGER.warning(
+                "Cannot compute IntZ because prior intensity mean/std are invalid (mean=%s, std=%s)",
+                mean,
+                std,
+            )
+            return base[["Name", "PeakId", "PriorIntensity", "IntZ"]]
+
+        base["IntZ"] = (base["PriorIntensity"] - mean_value) / std_value
+        return base[["Name", "PeakId", "PriorIntensity", "IntZ"]]
+
     # ------------------------------------------------------------------
     # Matching
     # ------------------------------------------------------------------
