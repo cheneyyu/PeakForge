@@ -1,0 +1,634 @@
+#!/usr/bin/env python3
+"""Peak shape analysis for paired bigWig samples.
+
+This module computes several shape descriptors (FWHM, core:flank ratio,
+centroid shift, and skewness) for each region provided in a BED file using two
+bigWig tracks. The script also generates summary plots and an outlier heatmap
+to visualise differences between the samples.
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import logging
+import math
+import os
+import shlex
+import shutil
+import subprocess
+import tempfile
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+import pyBigWig
+from matplotlib import pyplot as plt
+from scipy import stats
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class Interval:
+    """Container for BED interval information."""
+
+    chrom: str
+    start: int
+    end: int
+    name: str
+
+    @property
+    def peak_id(self) -> str:
+        return f"{self.chrom}:{self.start}-{self.end}"
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start
+
+
+def add_cli_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register peak shape CLI arguments on an existing parser."""
+
+    input_a = parser.add_mutually_exclusive_group(required=True)
+    input_a.add_argument("--bigwig-a", help="Path to sample A bigWig track")
+    input_a.add_argument(
+        "--bam-a",
+        help="Path to sample A BAM (auto-converted to bigWig via bamCoverage)",
+    )
+
+    input_b = parser.add_mutually_exclusive_group(required=True)
+    input_b.add_argument("--bigwig-b", help="Path to sample B bigWig track")
+    input_b.add_argument(
+        "--bam-b",
+        help="Path to sample B BAM (auto-converted to bigWig via bamCoverage)",
+    )
+
+    parser.add_argument("--bed", required=True, help="BED file with regions")
+    parser.add_argument(
+        "--core",
+        type=int,
+        default=500,
+        help="Half-width (bp) of the core window around the region centre",
+    )
+    parser.add_argument(
+        "--flank",
+        type=int,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        default=(1000, 3000),
+        help="Absolute distance range (bp) for the flank window",
+    )
+    parser.add_argument(
+        "--fwhm-threshold",
+        type=float,
+        default=0.5,
+        help="Fraction of the peak maximum used for FWHM determination",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="Number of worker threads for peak processing",
+    )
+    parser.add_argument(
+        "--out",
+        default="results/shape",
+        help="Output directory for tables and plots",
+    )
+    parser.add_argument(
+        "--bamcoverage-bin-size",
+        type=int,
+        default=10,
+        help="Bin size (bp) for bamCoverage when converting BAM inputs",
+    )
+    parser.add_argument(
+        "--bamcoverage-normalization",
+        default="RPKM",
+        help="bamCoverage normalisation method (e.g. RPKM, CPM, RPGC, or 'none')",
+    )
+    parser.add_argument(
+        "--bamcoverage-extra-args",
+        default="",
+        help="Additional bamCoverage arguments (quoted string)",
+    )
+    parser.add_argument("--log-level", default="INFO", help="Logging level")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Peak shape analysis")
+    add_cli_arguments(parser)
+    return parser
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
+
+
+def load_bed(path: str) -> List[Interval]:
+    frame = pd.read_csv(path, sep=r"\s+", comment="#", header=None, dtype={0: str}, engine="python")
+    if frame.empty:
+        raise ValueError(f"No intervals found in BED file: {path}")
+    if frame.shape[1] < 3:
+        raise ValueError(f"BED file must contain at least 3 columns: {path}")
+
+    columns = ["Chromosome", "Start", "End", "Name"][: frame.shape[1]]
+    frame = frame.iloc[:, : len(columns)].copy()
+    frame.columns = columns
+
+    frame["Start"] = pd.to_numeric(frame["Start"], errors="coerce")
+    frame["End"] = pd.to_numeric(frame["End"], errors="coerce")
+
+    invalid = frame["Chromosome"].isna() | frame["Start"].isna() | frame["End"].isna()
+    invalid |= frame["End"] <= frame["Start"]
+    invalid_count = int(invalid.sum())
+    if invalid_count:
+        LOGGER.warning("Skipping %d invalid BED rows from %s", invalid_count, path)
+
+    frame = frame.loc[~invalid]
+    if frame.empty:
+        raise ValueError(f"No valid intervals found in BED file: {path}")
+
+    if "Name" not in frame.columns:
+        frame["Name"] = None
+
+    intervals = []
+    for row in frame.itertuples(index=False):
+        chrom = str(row.Chromosome)
+        start = int(row.Start)
+        end = int(row.End)
+        name = row.Name
+        if name is None or pd.isna(name):
+            name = f"{chrom}:{start}-{end}"
+        intervals.append(Interval(chrom=chrom, start=start, end=end, name=str(name)))
+
+    return intervals
+
+
+BIGWIG_PATHS: Dict[str, str] = {}
+THREAD_LOCAL = threading.local()
+OPEN_HANDLES: List[pyBigWig.pyBigWig] = []
+OPEN_HANDLES_LOCK = threading.Lock()
+TEMP_DIRECTORIES: List[tempfile.TemporaryDirectory] = []
+
+
+def _register_handle(handle: pyBigWig.pyBigWig) -> None:
+    with OPEN_HANDLES_LOCK:
+        if not any(existing is handle for existing in OPEN_HANDLES):
+            OPEN_HANDLES.append(handle)
+
+
+def _close_handles() -> None:
+    with OPEN_HANDLES_LOCK:
+        for handle in OPEN_HANDLES:
+            try:
+                handle.close()
+            except Exception:  # pragma: no cover - cleanup best effort
+                continue
+        OPEN_HANDLES.clear()
+
+
+atexit.register(_close_handles)
+
+
+def _cleanup_temp_directories() -> None:
+    while TEMP_DIRECTORIES:
+        temp_dir = TEMP_DIRECTORIES.pop()
+        try:
+            temp_dir.cleanup()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            continue
+
+
+atexit.register(_cleanup_temp_directories)
+
+
+def get_bigwig(sample: str) -> pyBigWig.pyBigWig:
+    handles = getattr(THREAD_LOCAL, "handles", None)
+    if handles is None:
+        handles = {}
+        THREAD_LOCAL.handles = handles
+    bw = handles.get(sample)
+    if bw is None:
+        bw = pyBigWig.open(BIGWIG_PATHS[sample])
+        handles[sample] = bw
+        _register_handle(bw)
+    return bw
+
+
+def run_subprocess(cmd: Sequence[str]) -> None:
+    LOGGER.info("Running command: %s", shlex.join(cmd))
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        details = []
+        if result.stdout:
+            details.append(f"stdout:\n{result.stdout.strip()}")
+        if result.stderr:
+            details.append(f"stderr:\n{result.stderr.strip()}")
+        extra = "\n".join(details)
+        raise RuntimeError(
+            f"Command failed with exit code {result.returncode}: {shlex.join(cmd)}"
+            + (f"\n{extra}" if extra else "")
+        )
+
+
+def bam_to_bigwig(sample: str, bam_path: str, args: argparse.Namespace) -> str:
+    if shutil.which("bamCoverage") is None:
+        raise RuntimeError(
+            "bamCoverage not found on PATH. Install deepTools to convert BAM inputs."
+        )
+
+    bin_size = max(1, int(getattr(args, "bamcoverage_bin_size", 10)))
+    normalization = getattr(args, "bamcoverage_normalization", "RPKM")
+    extra = getattr(args, "bamcoverage_extra_args", "")
+
+    temp_dir = tempfile.TemporaryDirectory(prefix=f"peakshape_{sample}_")
+    TEMP_DIRECTORIES.append(temp_dir)
+    output_path = Path(temp_dir.name) / f"{sample}.bw"
+
+    cmd: List[str] = [
+        "bamCoverage",
+        "--bam",
+        bam_path,
+        "--outFileName",
+        str(output_path),
+        "--outFileFormat",
+        "bigwig",
+        "--binSize",
+        str(bin_size),
+    ]
+
+    if normalization and normalization.lower() != "none":
+        cmd.extend(["--normalizeUsing", normalization])
+
+    if extra:
+        cmd.extend(shlex.split(extra))
+
+    run_subprocess(cmd)
+
+    LOGGER.info("Converted %s to bigWig at %s", bam_path, output_path)
+    return str(output_path)
+
+
+def fetch_signal(sample: str, interval: Interval) -> Optional[np.ndarray]:
+    bw = get_bigwig(sample)
+    try:
+        values = bw.values(interval.chrom, interval.start, interval.end, numpy=True)
+    except RuntimeError:
+        LOGGER.warning(
+            "%s missing coverage for %s (interval outside of chrom)", sample, interval.peak_id
+        )
+        return None
+    if values is None:
+        return None
+    signal = np.asarray(values, dtype=float)
+    if signal.size == 0:
+        return None
+    signal = np.nan_to_num(signal, nan=0.0, posinf=0.0, neginf=0.0)
+    signal[signal < 0] = 0.0
+    if np.all(signal == 0):
+        return None
+    return signal
+
+
+def compute_metrics(
+    signal: Optional[np.ndarray],
+    *,
+    core_half_width: int,
+    flank_range: Tuple[int, int],
+    fwhm_threshold: float,
+) -> Dict[str, Optional[float]]:
+    if signal is None:
+        return {
+            "FWHM": math.nan,
+            "core_flank_ratio": math.nan,
+            "centroid": math.nan,
+            "skewness": math.nan,
+            "norm_signal": None,
+        }
+
+    total = signal.sum()
+    if not np.isfinite(total) or total <= 0:
+        return {
+            "FWHM": math.nan,
+            "core_flank_ratio": math.nan,
+            "centroid": math.nan,
+            "skewness": math.nan,
+            "norm_signal": None,
+        }
+
+    norm_signal = signal / total
+    max_val = norm_signal.max() if norm_signal.size else 0.0
+    if max_val <= 0 or not np.isfinite(max_val):
+        fwhm = math.nan
+    else:
+        threshold = max_val * fwhm_threshold
+        above = np.where(norm_signal >= threshold)[0]
+        if above.size == 0:
+            fwhm = math.nan
+        else:
+            fwhm = float(above[-1] - above[0] + 1)
+
+    length = norm_signal.size
+    centre = (length - 1) / 2.0
+    positions = np.arange(length, dtype=float) - centre
+
+    core_mask = np.abs(positions) <= core_half_width
+    flank_min, flank_max = flank_range
+    if flank_min > flank_max:
+        flank_min, flank_max = flank_max, flank_min
+    flank_mask = (np.abs(positions) >= flank_min) & (np.abs(positions) < flank_max)
+
+    core_sum = float(norm_signal[core_mask].sum()) if np.any(core_mask) else 0.0
+    flank_sum = float(norm_signal[flank_mask].sum()) if np.any(flank_mask) else 0.0
+    ratio = core_sum / flank_sum if flank_sum > 0 else math.nan
+
+    centroid = float(np.sum(positions * norm_signal))
+
+    try:
+        skewness = float(stats.skew(norm_signal, bias=False, nan_policy="omit"))
+    except Exception:  # pragma: no cover - defensive
+        skewness = math.nan
+
+    return {
+        "FWHM": fwhm,
+        "core_flank_ratio": ratio,
+        "centroid": centroid,
+        "skewness": skewness,
+        "norm_signal": norm_signal,
+    }
+
+
+def process_interval(interval: Interval, config: Dict[str, float]) -> Dict[str, object]:
+    try:
+        signal_a = fetch_signal("A", interval)
+        signal_b = fetch_signal("B", interval)
+        metrics_a = compute_metrics(
+            signal_a,
+            core_half_width=config["core_half_width"],
+            flank_range=config["flank_range"],
+            fwhm_threshold=config["fwhm_threshold"],
+        )
+        metrics_b = compute_metrics(
+            signal_b,
+            core_half_width=config["core_half_width"],
+            flank_range=config["flank_range"],
+            fwhm_threshold=config["fwhm_threshold"],
+        )
+    except Exception as exc:  # pragma: no cover - safety net
+        LOGGER.exception("Failed to process %s: %s", interval.peak_id, exc)
+        metrics_a = metrics_b = {
+            "FWHM": math.nan,
+            "core_flank_ratio": math.nan,
+            "centroid": math.nan,
+            "skewness": math.nan,
+            "norm_signal": None,
+        }
+
+    return {
+        "peak_id": interval.peak_id,
+        "chrom": interval.chrom,
+        "start": interval.start,
+        "end": interval.end,
+        "A_FWHM": metrics_a["FWHM"],
+        "B_FWHM": metrics_b["FWHM"],
+        "A_core_flank": metrics_a["core_flank_ratio"],
+        "B_core_flank": metrics_b["core_flank_ratio"],
+        "A_centroid": metrics_a["centroid"],
+        "B_centroid": metrics_b["centroid"],
+        "A_skewness": metrics_a["skewness"],
+        "B_skewness": metrics_b["skewness"],
+        "A_signal": metrics_a["norm_signal"],
+        "B_signal": metrics_b["norm_signal"],
+    }
+
+
+def ensure_output_dirs(base_dir: str) -> Tuple[str, str]:
+    table_dir = base_dir
+    plots_dir = os.path.join(base_dir, "plots")
+    os.makedirs(table_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True)
+    return table_dir, plots_dir
+
+
+def create_histogram(data: pd.Series, title: str, xlabel: str, output_path: str) -> None:
+    valid = data.replace([np.inf, -np.inf], np.nan).dropna()
+    if valid.empty:
+        LOGGER.warning("Skipping plot '%s' due to lack of valid data", title)
+        return
+    plt.figure(figsize=(8, 5))
+    plt.hist(valid, bins=40, color="#4c72b0", alpha=0.8)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel("Count")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+
+
+def create_scatter(data: pd.Series, title: str, ylabel: str, output_path: str) -> None:
+    valid = data.replace([np.inf, -np.inf], np.nan).dropna()
+    if valid.empty:
+        LOGGER.warning("Skipping plot '%s' due to lack of valid data", title)
+        return
+    plt.figure(figsize=(8, 5))
+    plt.scatter(range(len(valid)), valid, s=10, alpha=0.7, color="#dd8452")
+    plt.title(title)
+    plt.xlabel("Peak index")
+    plt.ylabel(ylabel)
+    plt.axhline(0, color="black", linewidth=0.8, linestyle="--")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+
+
+def resample_signal(signal: np.ndarray, bins: int = 200) -> np.ndarray:
+    if signal is None or signal.size == 0:
+        return np.full(bins, np.nan)
+    x_orig = np.linspace(0.0, 1.0, num=signal.size)
+    x_new = np.linspace(0.0, 1.0, num=bins)
+    return np.interp(x_new, x_orig, signal)
+
+
+def build_outlier_heatmap(
+    df: pd.DataFrame,
+    plots_dir: str,
+    max_peaks: int = 50,
+    bins: int = 200,
+) -> None:
+    delta_cols = ["delta_FWHM", "delta_core_flank", "delta_centroid", "delta_skewness"]
+    scores = np.zeros(len(df), dtype=float)
+    for col in delta_cols:
+        values = df[col].to_numpy(dtype=float)
+        mask = np.isfinite(values)
+        if not np.any(mask):
+            continue
+        subset = values[mask]
+        mean = subset.mean()
+        std = subset.std(ddof=0)
+        if std == 0:
+            continue
+        z = np.zeros_like(values)
+        z[mask] = (subset - mean) / std
+        scores += np.abs(z)
+
+    df = df.copy()
+    df["outlier_score"] = scores
+    df = df.sort_values("outlier_score", ascending=False)
+
+    heatmap_rows: List[np.ndarray] = []
+    labels: List[str] = []
+    for _, row in df.head(max_peaks).iterrows():
+        signal_a = row["A_signal"]
+        signal_b = row["B_signal"]
+        if signal_a is None or signal_b is None:
+            continue
+        resampled_a = resample_signal(signal_a, bins=bins)
+        resampled_b = resample_signal(signal_b, bins=bins)
+        diff = resampled_b - resampled_a
+        heatmap_rows.append(diff)
+        labels.append(row["peak_id"])
+
+    if not heatmap_rows:
+        LOGGER.warning("Skipping outlier heatmap (no valid signals)")
+        return
+
+    data = np.vstack(heatmap_rows)
+    plt.figure(figsize=(10, max(4, len(labels) * 0.2)))
+    masked = np.ma.masked_invalid(data)
+    im = plt.imshow(masked, aspect="auto", cmap="RdBu_r", interpolation="nearest")
+    plt.colorbar(im, label="Signal (B - A)")
+    plt.yticks(range(len(labels)), labels, fontsize=6)
+    plt.xlabel("Relative position (bins)")
+    plt.ylabel("Peak")
+    plt.title("Top outlier peaks (B - A signal difference)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, "top_outlier_heatmap.png"), dpi=300)
+    plt.close()
+
+
+def configure_logging(level: str) -> None:
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=log_level, format="[%(levelname)s] %(message)s")
+    else:
+        root_logger.setLevel(log_level)
+    LOGGER.setLevel(log_level)
+
+
+def run_peak_shape(args: argparse.Namespace) -> None:
+    configure_logging(args.log_level)
+
+    LOGGER.info("Loading intervals from %s", args.bed)
+    intervals = load_bed(args.bed)
+    LOGGER.info("Loaded %d intervals", len(intervals))
+
+    BIGWIG_PATHS.clear()
+    _close_handles()
+    THREAD_LOCAL.handles = {}
+
+    if getattr(args, "bigwig_a", None):
+        BIGWIG_PATHS["A"] = args.bigwig_a
+    else:
+        bam_a = getattr(args, "bam_a", None)
+        if bam_a is None:
+            raise ValueError("Either --bigwig-a or --bam-a must be provided")
+        if not os.path.exists(bam_a):
+            raise FileNotFoundError(f"BAM file for sample A not found: {bam_a}")
+        BIGWIG_PATHS["A"] = bam_to_bigwig("A", bam_a, args)
+
+    if getattr(args, "bigwig_b", None):
+        BIGWIG_PATHS["B"] = args.bigwig_b
+    else:
+        bam_b = getattr(args, "bam_b", None)
+        if bam_b is None:
+            raise ValueError("Either --bigwig-b or --bam-b must be provided")
+        if not os.path.exists(bam_b):
+            raise FileNotFoundError(f"BAM file for sample B not found: {bam_b}")
+        BIGWIG_PATHS["B"] = bam_to_bigwig("B", bam_b, args)
+
+    # Validate bigWig accessibility
+    for sample, path in BIGWIG_PATHS.items():
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"bigWig file for sample {sample} not found: {path}")
+        with pyBigWig.open(path) as bw:
+            if bw.chroms() is None:
+                raise ValueError(f"Failed to read chromosome info from {path}")
+
+    threads = max(1, int(args.threads))
+    config = {
+        "core_half_width": int(args.core),
+        "flank_range": (int(args.flank[0]), int(args.flank[1])),
+        "fwhm_threshold": float(args.fwhm_threshold),
+    }
+
+    LOGGER.info(
+        "Processing peaks (threads=%d, core=±%dbp, flank=%s, FWHM threshold=%.2f)",
+        threads,
+        config["core_half_width"],
+        config["flank_range"],
+        config["fwhm_threshold"],
+    )
+
+    if threads == 1:
+        results = [process_interval(interval, config) for interval in intervals]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            results = list(executor.map(lambda iv: process_interval(iv, config), intervals))
+
+    df = pd.DataFrame(results)
+
+    df["delta_FWHM"] = df["B_FWHM"] - df["A_FWHM"]
+    df["delta_core_flank"] = df["B_core_flank"] - df["A_core_flank"]
+    df["delta_centroid"] = df["B_centroid"] - df["A_centroid"]
+    df["delta_skewness"] = df["B_skewness"] - df["A_skewness"]
+
+    output_dir, plots_dir = ensure_output_dirs(args.out)
+    table_path = os.path.join(output_dir, "peak_shape.tsv")
+
+    df_export = df.drop(columns=["A_signal", "B_signal"])
+    df_export.to_csv(table_path, sep="\t", index=False, float_format="%.6f")
+    LOGGER.info("Wrote metrics table to %s", table_path)
+
+    _close_handles()
+    THREAD_LOCAL.handles = {}
+    _cleanup_temp_directories()
+
+    create_histogram(
+        df["delta_FWHM"],
+        title="ΔFWHM distribution",
+        xlabel="ΔFWHM (B - A, bp)",
+        output_path=os.path.join(plots_dir, "delta_fwhm_hist.png"),
+    )
+    create_histogram(
+        df["delta_core_flank"],
+        title="Δcore:flank ratio distribution",
+        xlabel="Δ(core:flank) (B - A)",
+        output_path=os.path.join(plots_dir, "delta_core_flank_hist.png"),
+    )
+    create_scatter(
+        df["delta_centroid"],
+        title="Δcentroid scatter",
+        ylabel="Δcentroid (B - A, bp)",
+        output_path=os.path.join(plots_dir, "delta_centroid_scatter.png"),
+    )
+
+    build_outlier_heatmap(df, plots_dir=plots_dir, max_peaks=50, bins=200)
+
+    LOGGER.info("Analysis complete")
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = parse_args(argv)
+    run_peak_shape(args)
+
+
+if __name__ == "__main__":
+    main()

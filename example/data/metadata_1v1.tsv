@@ -1,0 +1,3 @@
+sample	condition	bam	control_bam
+K562_rep1	K562	example/data/K562_rep1.bam	example/data/K562_input.bam
+HepG2_rep1	HepG2	example/data/HepG2_rep1.bam	example/data/HepG2_input.bam

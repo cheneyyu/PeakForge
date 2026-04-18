@@ -1,0 +1,16 @@
+.DS_Store
+.pytest_cache/
+.venv/
+__pycache__/
+*.pyc
+
+example/data/*.bam
+example/data/*.bai
+example/data2/*.bam
+example/data2/*.bai
+
+example/results/
+example/results_1v1/
+example/results_3v3/
+example/peak_shape/data/
+example/peak_shape/results/

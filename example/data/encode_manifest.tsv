@@ -1,0 +1,7 @@
+sample	condition	role	accession	destination	md5sum	url
+K562_rep1	K562	chip	ENCFF975ETI	/home/mcp2/proj2/PeakForge/github_upload/example/data/K562_rep1.bam		https://www.encodeproject.org/files/ENCFF975ETI/@@download/ENCFF975ETI.bam
+K562_rep2	K562	chip	ENCFF380OWL	/home/mcp2/proj2/PeakForge/github_upload/example/data/K562_rep2.bam		https://www.encodeproject.org/files/ENCFF380OWL/@@download/ENCFF380OWL.bam
+HepG2_rep1	HepG2	chip	ENCFF315AUW	/home/mcp2/proj2/PeakForge/github_upload/example/data/HepG2_rep1.bam		https://www.encodeproject.org/files/ENCFF315AUW/@@download/ENCFF315AUW.bam
+HepG2_rep2	HepG2	chip	ENCFF987GJQ	/home/mcp2/proj2/PeakForge/github_upload/example/data/HepG2_rep2.bam		https://www.encodeproject.org/files/ENCFF987GJQ/@@download/ENCFF987GJQ.bam
+K562_input	K562	input	ENCFF500EAO	/home/mcp2/proj2/PeakForge/github_upload/example/data/K562_input.bam		https://www.encodeproject.org/files/ENCFF500EAO/@@download/ENCFF500EAO.bam
+HepG2_input	HepG2	input	ENCFF062SCH	/home/mcp2/proj2/PeakForge/github_upload/example/data/HepG2_input.bam		https://www.encodeproject.org/files/ENCFF062SCH/@@download/ENCFF062SCH.bam
