@@ -1,5 +1,7 @@
 # PeakForge
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/cheneyyu/PeakForge/blob/main/colab/PeakForge_Colab_Quickstart.ipynb)
+
 PeakForge is a Python-native toolkit for two-group differential analysis of narrow-peak chromatin profiles. It implements two evidence levels:
 
 - Replicate-supported mode uses PyDESeq2 and is the formal inferential mode. It reports `pvalue`, `padj`, and differential-peak calls.

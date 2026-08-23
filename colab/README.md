@@ -1,10 +1,12 @@
-# Google Colab Support
+# Google Colab support
 
-PeakForge can run in Google Colab for lightweight tutorials, small user datasets, and smoke tests. The most practical Colab target is:
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/cheneyyu/PeakForge/blob/main/colab/PeakForge_Colab_Quickstart.ipynb)
+
+PeakForge can run in Google Colab for lightweight tutorials and small user datasets. The most practical Colab workflows are:
 
 - `runmode` on a small number of BAM files
 - analyses that reuse pre-called peaks or an existing consensus BED
-- peak-shape profiling on small inputs
+- result inspection and peak-shape profiling on small inputs
 
 Colab is not the best environment for the full public ENCODE benchmark because:
 
@@ -12,25 +14,21 @@ Colab is not the best environment for the full public ENCODE benchmark because:
 - Colab VM disk and session lifetime are limited
 - repeated indexing and peak calling can be slow on ephemeral machines
 
-The Colab notebook intentionally spells out the ENCODE downloads directly in notebook cells, rather than delegating them to `example/download_encode.sh`, so the workflow stays transparent for Colab users.
+The quickstart provides editable replicate-supported and exact 1-vs-1 command templates, along with cells for inspecting results and run provenance.
 
 ## Recommended Colab workflow
 
 Clone the repository and run the setup commands from the repository root:
 
 ```bash
-!git clone https://github.com/cheneyyu/PeakForge.git
+!git clone --depth 1 --branch v0.2.3 https://github.com/cheneyyu/PeakForge.git
 %cd PeakForge
 !apt-get update -y
 !apt-get install -y samtools
 !python3 -m pip install --prefer-binary -e '.[macs3]'
 ```
 
-Or open the notebook directly in Colab:
-
-```text
-colab/PeakForge_Colab_Quickstart.ipynb
-```
+Or use the **Open in Colab** badge above.
 
 This installs:
 
@@ -58,10 +56,7 @@ After setup, verify the environment:
 !macs3 --version
 ```
 
-The notebook focuses on installation and small user-supplied examples. In
-replicated runs, adjusted p values support formal two-group inference. Exact
-`1 vs 1` runs instead return exploratory normalized-effect and MARS rankings;
-their sampling p/q diagnostics do not estimate biological variability.
+The notebook focuses on installation and small user-supplied examples. Replicated runs use PyDESeq2 for two-group inference. Exact `1 vs 1` runs return exploratory normalized-effect and MARS rankings; their sampling p/q diagnostics do not estimate biological variability.
 
 ## Minimal Colab example
 
