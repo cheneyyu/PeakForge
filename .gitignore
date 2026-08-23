@@ -1,8 +1,12 @@
 .DS_Store
 .pytest_cache/
+.ruff_cache/
 .venv/
 __pycache__/
 *.pyc
+build/
+dist/
+*.egg-info/
 
 example/data/*.bam
 example/data/*.bai
@@ -14,3 +18,9 @@ example/results_1v1/
 example/results_3v3/
 example/peak_shape/data/
 example/peak_shape/results/
+
+# Keep local analyses and publication/review materials out of the software repo.
+revision/
+manuscript*/
+review*.txt
+*_major_revision_plan.txt

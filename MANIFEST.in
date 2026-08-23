@@ -1,0 +1,8 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include uv.lock
+recursive-include .github *.yml
+recursive-include colab *.ipynb *.md *.sh
+recursive-include example *.py *.sh *.md *.tsv
+recursive-include tests *.py

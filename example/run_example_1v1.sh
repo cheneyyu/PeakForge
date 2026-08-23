@@ -39,4 +39,4 @@ echo "[peakforge] Running 1v1 example -> ${RESULTS_DIR}" \
   )
 
 echo "Results written to ${RESULTS_DIR}" \
-  && echo "Inspect ${RESULTS_DIR}/differential_results.tsv for MARS outputs."
+  && echo "Inspect ${RESULTS_DIR}/differential_results.tsv for exploratory normalized-effect and MARS rankings."

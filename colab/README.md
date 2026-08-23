@@ -58,7 +58,10 @@ After setup, verify the environment:
 !macs3 --version
 ```
 
-The default notebook follows the standard input-aware ChIP-seq path: it downloads six ENCODE MYC BAMs plus the two matched input-control BAMs and uses those controls in the example `1 vs 1` and `2 vs 2` runs. The manuscript's no-input sensitivity rerun is not part of the default Colab workflow.
+The notebook focuses on installation and small user-supplied examples. In
+replicated runs, adjusted p values support formal two-group inference. Exact
+`1 vs 1` runs instead return exploratory normalized-effect and MARS rankings;
+their sampling p/q diagnostics do not estimate biological variability.
 
 ## Minimal Colab example
 
@@ -79,7 +82,9 @@ If you already have BAM and peak files in the Colab working directory or on Goog
   --threads 2
 ```
 
-For ATAC-seq or CUT&Tag, omit `--a-controls` and `--b-controls`.
+For assays without matched input controls, omit `--a-controls` and
+`--b-controls`. Assay-appropriate peak-calling and counting settings remain the
+user's responsibility.
 
 If you already have a consensus BED, you can reuse it:
 

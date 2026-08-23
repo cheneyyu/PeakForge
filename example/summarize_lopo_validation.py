@@ -1,165 +1,238 @@
 #!/usr/bin/env python3
-"""Summarize 3v3 leave-one-pair-out validation outputs."""
+"""Summarize fixed-consensus held-out ranking comparisons.
+
+Each fold compares an exploratory exact-1-vs-1 ranking with formal calls from
+a replicate-supported 2-vs-2 reference. The reference is empirical, not
+independent ground truth.
+"""
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
-import statistics
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from scipy.stats import rankdata
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Summarize held-out 3v3 PeakForge validation folds")
-    parser.add_argument("--results-root", required=True, help="Root directory containing fold outputs")
-    parser.add_argument("--output-dir", required=True, help="Directory where summary files will be written")
-    parser.add_argument("--alpha", type=float, default=0.05, help="Adjusted p-value cutoff for gold-standard hits")
-    parser.add_argument("--lfc", type=float, default=0.0, help="Absolute log2FC cutoff for gold-standard hits")
-    return parser.parse_args()
+    parser = argparse.ArgumentParser(
+        description="Summarize three fixed-consensus held-out PeakForge folds"
+    )
+    parser.add_argument(
+        "--results-root", required=True, help="Root directory containing fold outputs"
+    )
+    parser.add_argument(
+        "--output-dir", required=True, help="Directory for summary tables"
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="Adjusted-p cutoff for replicate-supported reference calls",
+    )
+    parser.add_argument(
+        "--lfc",
+        type=float,
+        default=0.0,
+        help="Minimum absolute reference log2 fold change",
+    )
+    parser.add_argument(
+        "--top-fraction",
+        type=float,
+        default=0.05,
+        help="Fraction of eligible held-out peaks used for top-rank precision/recall",
+    )
+    args = parser.parse_args()
+    if not 0.0 < args.alpha <= 1.0:
+        parser.error("--alpha must be in (0, 1]")
+    if args.lfc < 0.0:
+        parser.error("--lfc must be non-negative")
+    if not 0.0 < args.top_fraction <= 1.0:
+        parser.error("--top-fraction must be in (0, 1]")
+    return args
 
 
-def clean_header(value: str | None) -> str:
-    return (value or "").replace("#", "").replace("'", "").replace('"', "").strip()
+def clean_header(value: object) -> str:
+    return str(value).replace("#", "").replace("'", "").replace('"', "").strip()
 
 
-def parse_float(value: str | None, default: float = 0.0) -> float:
-    if value in (None, ""):
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
+def load_results(path: Path) -> pd.DataFrame:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    frame = pd.read_csv(path, sep="\t")
+    frame.columns = [clean_header(column) for column in frame.columns]
+    if "Peak" not in frame.columns:
+        first = frame.columns[0]
+        if first.startswith("Unnamed"):
+            frame = frame.rename(columns={first: "Peak"})
+    if "Peak" not in frame.columns:
+        raise ValueError(f"Results file {path} is missing Peak identifiers")
+    frame["Peak"] = frame["Peak"].astype(str)
+    if frame["Peak"].duplicated().any():
+        raise ValueError(f"Results file {path} contains duplicate Peak identifiers")
+    return frame.set_index("Peak", drop=False)
 
 
-def load_results(path: Path) -> dict[str, dict[str, str]]:
-    with path.open(newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        rows: dict[str, dict[str, str]] = {}
-        for row in reader:
-            cleaned = {clean_header(key): value for key, value in row.items()}
-            peak = cleaned.get("Peak")
-            if not peak:
-                raise ValueError(f"Results file {path} is missing Peak identifiers")
-            rows[peak] = cleaned
-    return rows
+def boolean_series(values: pd.Series) -> pd.Series:
+    if pd.api.types.is_bool_dtype(values):
+        return values.fillna(False)
+    return values.astype(str).str.lower().isin({"true", "1", "yes"})
 
 
-def auc(labels: list[bool], scores: list[float]) -> float:
-    paired = [(float(score), 1 if label else 0) for label, score in zip(labels, scores)]
-    positives = sum(label for _, label in paired)
-    negatives = len(paired) - positives
+def auroc(labels: np.ndarray, scores: np.ndarray) -> float:
+    positives = int(labels.sum())
+    negatives = int(len(labels) - positives)
     if positives == 0 or negatives == 0:
         return float("nan")
-
-    paired.sort(key=lambda item: item[0])
-    rank_sum = 0.0
-    rank = 1
-    idx = 0
-    while idx < len(paired):
-        end = idx + 1
-        while end < len(paired) and paired[end][0] == paired[idx][0]:
-            end += 1
-        avg_rank = (rank + (rank + (end - idx) - 1)) / 2.0
-        positives_in_tie = sum(label for _, label in paired[idx:end])
-        rank_sum += avg_rank * positives_in_tie
-        rank += end - idx
-        idx = end
-
-    return (rank_sum - positives * (positives + 1) / 2.0) / (positives * negatives)
+    ranks = rankdata(scores, method="average")
+    rank_sum = float(ranks[labels].sum())
+    return (rank_sum - positives * (positives + 1) / 2.0) / (
+        positives * negatives
+    )
 
 
-def pearsonr(x: list[float], y: list[float]) -> float:
-    if len(x) != len(y) or not x:
+def average_precision(labels: np.ndarray, scores: np.ndarray) -> float:
+    positives = int(labels.sum())
+    if positives == 0:
         return float("nan")
-    mean_x = statistics.fmean(x)
-    mean_y = statistics.fmean(y)
-    numerator = sum((a - mean_x) * (b - mean_y) for a, b in zip(x, y))
-    denom_x = math.sqrt(sum((a - mean_x) ** 2 for a in x))
-    denom_y = math.sqrt(sum((b - mean_y) ** 2 for b in y))
-    if denom_x == 0.0 or denom_y == 0.0:
-        return float("nan")
-    return numerator / (denom_x * denom_y)
-
-
-def rankdata(values: list[float]) -> list[float]:
-    indexed = sorted(enumerate(values), key=lambda item: item[1])
-    ranks = [0.0] * len(values)
+    order = np.argsort(-scores, kind="mergesort")
+    ordered_scores = scores[order]
+    ordered_labels = labels[order]
+    true_positives = 0
+    false_positives = 0
+    previous_recall = 0.0
+    result = 0.0
     start = 0
-    while start < len(indexed):
+    while start < len(order):
         end = start + 1
-        while end < len(indexed) and indexed[end][1] == indexed[start][1]:
+        while end < len(order) and ordered_scores[end] == ordered_scores[start]:
             end += 1
-        avg_rank = (start + 1 + end) / 2.0
-        for idx in range(start, end):
-            ranks[indexed[idx][0]] = avg_rank
+        group = ordered_labels[start:end]
+        true_positives += int(group.sum())
+        false_positives += int(len(group) - group.sum())
+        recall = true_positives / positives
+        precision = true_positives / (true_positives + false_positives)
+        result += (recall - previous_recall) * precision
+        previous_recall = recall
         start = end
-    return ranks
+    return result
 
 
-def spearmanr(x: list[float], y: list[float]) -> float:
-    if len(x) != len(y) or not x:
+def precision_at(labels: np.ndarray, scores: np.ndarray, size: int) -> float:
+    if len(labels) == 0:
         return float("nan")
-    return pearsonr(rankdata(x), rankdata(y))
+    selected = np.argsort(-scores, kind="mergesort")[: min(size, len(labels))]
+    return float(labels[selected].mean())
+
+
+def json_ready(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): json_ready(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_ready(item) for item in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 def evaluate_fold(
     fold: int,
-    gold_rows: dict[str, dict[str, str]],
-    heldout_rows: dict[str, dict[str, str]],
+    reference: pd.DataFrame,
+    heldout: pd.DataFrame,
     *,
     alpha: float,
     lfc: float,
-) -> dict[str, float | int]:
-    shared_peaks = sorted(set(gold_rows) & set(heldout_rows))
-    if not shared_peaks:
-        raise ValueError(f"Fold {fold} has no shared peaks between gold and held-out runs")
+    top_fraction: float,
+) -> dict[str, object]:
+    reference_required = {"Peak", "log2FC", "padj"}
+    heldout_required = {"Peak", "normalized_log2fc", "rank_eligible"}
+    if missing := reference_required - set(reference.columns):
+        raise ValueError(f"Reference fold {fold} is missing: {sorted(missing)}")
+    if missing := heldout_required - set(heldout.columns):
+        raise ValueError(f"Held-out fold {fold} is missing: {sorted(missing)}")
 
-    gold_lfc = [parse_float(gold_rows[peak].get("log2FC")) for peak in shared_peaks]
-    heldout_lfc = [parse_float(heldout_rows[peak].get("log2FC")) for peak in shared_peaks]
-
-    labels = [
-        parse_float(gold_rows[peak].get("padj"), 1.0) <= alpha
-        and abs(parse_float(gold_rows[peak].get("log2FC"))) >= lfc
-        for peak in shared_peaks
-    ]
-    gold_sig = sum(labels)
-    heldout_sig = sum(parse_float(heldout_rows[peak].get("padj"), 1.0) <= alpha for peak in shared_peaks)
-    sign_concordance = (
-        sum((math.copysign(1.0, g) == math.copysign(1.0, h)) for g, h in zip(gold_lfc, heldout_lfc)) / len(shared_peaks)
-        if shared_peaks
-        else float("nan")
+    shared = reference.index.intersection(heldout.index, sort=False)
+    if shared.empty:
+        raise ValueError(f"Fold {fold} has no shared fixed-consensus intervals")
+    frame = pd.DataFrame(
+        {
+            "reference_effect": pd.to_numeric(
+                reference.loc[shared, "log2FC"], errors="coerce"
+            ),
+            "reference_padj": pd.to_numeric(
+                reference.loc[shared, "padj"], errors="coerce"
+            ),
+            "heldout_effect": pd.to_numeric(
+                heldout.loc[shared, "normalized_log2fc"], errors="coerce"
+            ),
+            "rank_eligible": boolean_series(
+                heldout.loc[shared, "rank_eligible"]
+            ).to_numpy(),
+        },
+        index=shared,
     )
+    frame["reference_positive"] = frame["reference_padj"].lt(alpha) & frame[
+        "reference_effect"
+    ].abs().ge(lfc)
+    evaluable = frame.loc[
+        frame["rank_eligible"]
+        & frame["reference_padj"].notna()
+        & frame["reference_effect"].notna()
+        & frame["heldout_effect"].notna()
+    ].copy()
+    if evaluable.empty:
+        raise ValueError(f"Fold {fold} has no rank-eligible shared intervals")
+
+    labels = evaluable["reference_positive"].to_numpy(dtype=bool)
+    scores = evaluable["heldout_effect"].abs().to_numpy(dtype=float)
+    top_size = max(1, math.ceil(len(evaluable) * top_fraction))
+    top_order = np.argsort(-scores, kind="mergesort")[:top_size]
+    top_true = int(labels[top_order].sum())
+    total_positive = int(labels.sum())
 
     return {
         "fold": fold,
-        "n_shared_peaks": len(shared_peaks),
-        "gold_significant": gold_sig,
-        "heldout_significant": heldout_sig,
-        "pearson_log2fc": pearsonr(gold_lfc, heldout_lfc),
-        "spearman_log2fc": spearmanr(gold_lfc, heldout_lfc),
-        "sign_concordance": sign_concordance,
-        "heldout_abs_lfc_auroc": auc(labels, [abs(value) for value in heldout_lfc]),
+        "shared_intervals": int(len(frame)),
+        "evaluation_intervals": int(len(evaluable)),
+        "reference_formal_calls_shared": int(frame["reference_positive"].sum()),
+        "reference_formal_calls_evaluable": total_positive,
+        "positive_prevalence": total_positive / len(evaluable),
+        "heldout_rank_eligible_intervals": int(frame["rank_eligible"].sum()),
+        "pearson_effect": float(
+            evaluable["reference_effect"].corr(
+                evaluable["heldout_effect"], method="pearson"
+            )
+        ),
+        "spearman_effect": float(
+            evaluable["reference_effect"].corr(
+                evaluable["heldout_effect"], method="spearman"
+            )
+        ),
+        "sign_concordance": float(
+            (
+                np.sign(evaluable["reference_effect"])
+                == np.sign(evaluable["heldout_effect"])
+            ).mean()
+        ),
+        "auroc": auroc(labels, scores),
+        "auprc": average_precision(labels, scores),
+        "precision_at_100": precision_at(labels, scores, 100),
+        "precision_at_500": precision_at(labels, scores, 500),
+        "top_fraction": top_fraction,
+        "precision_at_top_fraction": top_true / top_size,
+        "recall_at_top_fraction": (
+            top_true / total_positive if total_positive else float("nan")
+        ),
+        "analysis_interpretation": (
+            "exploratory_ranking_vs_replicate_supported_reference_not_ground_truth"
+        ),
     }
-
-
-def write_tsv(path: Path, rows: list[dict[str, float | int]]) -> None:
-    if not rows:
-        raise ValueError("No rows available to write")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = list(rows[0].keys())
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def mean_ignore_nan(values: list[float]) -> float:
-    clean = [value for value in values if not math.isnan(value)]
-    if not clean:
-        return float("nan")
-    return statistics.fmean(clean)
 
 
 def main() -> None:
@@ -168,39 +241,42 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rows: list[dict[str, float | int]] = []
+    rows = []
     for fold in (1, 2, 3):
-        gold_path = results_root / f"fold{fold}_gold_2v2" / "differential_results.tsv"
-        heldout_path = results_root / f"fold{fold}_heldout_1v1" / "differential_results.tsv"
-        if not gold_path.exists():
-            raise FileNotFoundError(f"Missing fold {fold} gold results: {gold_path}")
-        if not heldout_path.exists():
-            raise FileNotFoundError(f"Missing fold {fold} held-out results: {heldout_path}")
+        reference_path = (
+            results_root
+            / f"fold{fold}_reference_2v2"
+            / "differential_results.tsv"
+        )
+        heldout_path = (
+            results_root / f"fold{fold}_heldout_1v1" / "differential_results.tsv"
+        )
         rows.append(
             evaluate_fold(
                 fold,
-                load_results(gold_path),
+                load_results(reference_path),
                 load_results(heldout_path),
                 alpha=args.alpha,
                 lfc=args.lfc,
+                top_fraction=args.top_fraction,
             )
         )
 
-    write_tsv(output_dir / "lopo_summary.tsv", rows)
-
+    frame = pd.DataFrame(rows)
+    frame.to_csv(output_dir / "lopo_summary.tsv", sep="\t", index=False)
+    numeric = frame.select_dtypes(include=[np.number])
     summary = {
+        "reference_status": "replicate_supported_reference_not_ground_truth",
+        "single_pair_status": "exploratory_ranking_no_biological_variance_estimation",
         "alpha": args.alpha,
         "lfc": args.lfc,
+        "top_fraction": args.top_fraction,
         "folds": rows,
-        "mean_shared_peaks": mean_ignore_nan([float(row["n_shared_peaks"]) for row in rows]),
-        "mean_gold_significant": mean_ignore_nan([float(row["gold_significant"]) for row in rows]),
-        "mean_heldout_significant": mean_ignore_nan([float(row["heldout_significant"]) for row in rows]),
-        "mean_pearson_log2fc": mean_ignore_nan([float(row["pearson_log2fc"]) for row in rows]),
-        "mean_spearman_log2fc": mean_ignore_nan([float(row["spearman_log2fc"]) for row in rows]),
-        "mean_sign_concordance": mean_ignore_nan([float(row["sign_concordance"]) for row in rows]),
-        "mean_heldout_abs_lfc_auroc": mean_ignore_nan([float(row["heldout_abs_lfc_auroc"]) for row in rows]),
+        "mean_metrics": numeric.mean(numeric_only=True).to_dict(),
     }
-    (output_dir / "lopo_summary.json").write_text(json.dumps(summary, indent=2))
+    (output_dir / "lopo_summary.json").write_text(
+        json.dumps(json_ready(summary), indent=2, allow_nan=False) + "\n"
+    )
 
 
 if __name__ == "__main__":

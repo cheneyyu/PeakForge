@@ -136,7 +136,7 @@ def write_manifest(path: Path, entries: list[dict[str, str]], *, data_dir: Path,
                     entry["condition"],
                     entry["role"],
                     entry["accession"],
-                    str(local_path(entry, data_dir=data_dir, data2_dir=data2_dir)),
+                    rel_path(entry),
                     "",
                     entry["url"],
                 ]

@@ -1,0 +1,18 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lightweight-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install command-line dependency
+        run: sudo apt-get update && sudo apt-get install -y samtools
+      - name: Create locked environment
+        run: uv sync --frozen --extra dev --extra macs3
+      - name: Run tests
+        run: uv run pytest -q

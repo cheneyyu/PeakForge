@@ -1,14 +1,14 @@
 # Example workflows
 
-This directory contains public-data examples for the GitHub-ready PeakForge distribution.
+This directory contains public-data examples for the PeakForge software release.
 
 ## What is included
 
 - `download_encode.sh`: download the public ENCODE MYC ChIP-seq BAMs plus matched input-control BAMs
 - `run_pipeline.sh`: replicate-aware `2 vs 2` benchmark
-- `run_example_1v1.sh`: no-replicate `1 vs 1` benchmark
+- `run_example_1v1.sh`: exploratory exact-`1 vs 1` ranking example
 - `run_example2.sh`: direct `runmode` example using BAMs and optional peak files
-- `run_lopo_validation.sh`: optional `3-fold` held-out validation using a third replicate pair
+- `run_lopo_validation.sh`: optional three-fold held-out ranking comparison using a third replicate pair
 - `peak_shape/`: synthetic peak-shape demo
 
 ## Before running
@@ -59,13 +59,15 @@ Expected output:
 example/results/2v2/
 ```
 
-## Example 3: run the `1 vs 1` fallback
+## Example 3: run the exploratory `1 vs 1` mode
 
 ```bash
 bash example/run_example_1v1.sh
 ```
 
 This example is also input-aware by default and reads `control_bam` from `example/data/metadata_1v1.tsv`.
+It returns candidate rankings and normalized effects; it does not estimate
+biological variability or make FDR-controlled differential-peak calls.
 
 Expected output:
 
@@ -86,7 +88,9 @@ Expected output:
 example/results_3v3/
 ```
 
-The manuscript's no-input sensitivity check is not part of the default GitHub or Colab workflow.
+Each fold uses a replicate-supported `2 vs 2` result as an empirical reference
+and evaluates a held-out exploratory `1 vs 1` ranking on the same consensus.
+The empirical reference is not independent ground truth.
 
 ## Example 5: direct `runmode`
 

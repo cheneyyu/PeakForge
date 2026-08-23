@@ -131,7 +131,7 @@ run_chipdiff() {
     --output-dir "${output_dir}"
     --peak-dir "${output_dir}/peaks"
     --peak-type narrow
-    --peak-extension 250
+    --peak-edge-padding 250
     --min-overlap "${min_overlap}"
     --macs2-genome hs
     --threads "${THREADS}"
@@ -158,20 +158,20 @@ refresh_peak_cache() {
 
 prepare_fold() {
   local fold="$1"
-  local -n gold_samples_ref="$2"
+  local -n reference_samples_ref="$2"
   local -n heldout_samples_ref="$3"
 
-  local gold_metadata="${METADATA_DIR}/fold${fold}_gold.tsv"
+  local reference_metadata="${METADATA_DIR}/fold${fold}_reference.tsv"
   local heldout_metadata="${METADATA_DIR}/fold${fold}_heldout.tsv"
-  local gold_dir="${RESULTS_ROOT}/fold${fold}_gold_2v2"
+  local reference_dir="${RESULTS_ROOT}/fold${fold}_reference_2v2"
   local heldout_dir="${RESULTS_ROOT}/fold${fold}_heldout_1v1"
 
-  write_metadata "${gold_metadata}" "${gold_samples_ref[@]}"
-  run_chipdiff "${gold_metadata}" "${gold_dir}" 2
-  refresh_peak_cache "${gold_dir}" "${gold_samples_ref[@]}"
+  write_metadata "${reference_metadata}" "${reference_samples_ref[@]}"
+  run_chipdiff "${reference_metadata}" "${reference_dir}" 2
+  refresh_peak_cache "${reference_dir}" "${reference_samples_ref[@]}"
 
   write_metadata "${heldout_metadata}" "${heldout_samples_ref[@]}"
-  run_chipdiff "${heldout_metadata}" "${heldout_dir}" 1 "${gold_dir}/consensus_peaks.bed"
+  run_chipdiff "${heldout_metadata}" "${heldout_dir}" 1 "${reference_dir}/consensus_peaks.bed"
 }
 
 main() {
@@ -193,16 +193,16 @@ main() {
   ensure_bam_index "${BAMS[K562_rep3]}"
   ensure_bam_index "${BAMS[HepG2_rep3]}"
 
-  local fold1_gold=(K562_rep2 K562_rep3 HepG2_rep2 HepG2_rep3)
+  local fold1_reference=(K562_rep2 K562_rep3 HepG2_rep2 HepG2_rep3)
   local fold1_heldout=(K562_rep1 HepG2_rep1)
-  local fold2_gold=(K562_rep1 K562_rep3 HepG2_rep1 HepG2_rep3)
+  local fold2_reference=(K562_rep1 K562_rep3 HepG2_rep1 HepG2_rep3)
   local fold2_heldout=(K562_rep2 HepG2_rep2)
-  local fold3_gold=(K562_rep1 K562_rep2 HepG2_rep1 HepG2_rep2)
+  local fold3_reference=(K562_rep1 K562_rep2 HepG2_rep1 HepG2_rep2)
   local fold3_heldout=(K562_rep3 HepG2_rep3)
 
-  prepare_fold 1 fold1_gold fold1_heldout
-  prepare_fold 2 fold2_gold fold2_heldout
-  prepare_fold 3 fold3_gold fold3_heldout
+  prepare_fold 1 fold1_reference fold1_heldout
+  prepare_fold 2 fold2_reference fold2_heldout
+  prepare_fold 3 fold3_reference fold3_heldout
 
   "${PYTHON_BIN}" "${ROOT}/summarize_lopo_validation.py" \
     --results-root "${RESULTS_ROOT}" \

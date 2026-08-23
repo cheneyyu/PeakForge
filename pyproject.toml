@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "peakforge"
-version = "0.1.0"
-description = "Replicate-aware and data-limited differential analysis for ATAC-seq, CUT&Tag, and ChIP-seq peak data"
+version = "0.2.3"
+description = "Replicate-supported inference and exploratory single-pair ranking for narrow-peak chromatin profiles"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
   "deeptools>=3.5.5",
   "gseapy>=1.1.3",
@@ -28,7 +29,7 @@ dependencies = [
 peakforge = "chipdiff:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.12"]
 macs3 = ["macs3>=3.0.1"]
 
 [tool.setuptools]

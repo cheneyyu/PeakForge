@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """chipdiff.py
 
-End-to-end pipeline for CUT&Tag / ChIP-seq differential analysis.
+Two-group narrow-peak chromatin differential analysis and exploratory ranking.
 
 The script expects a sample sheet describing the input BAM files and
 (optional) pre-computed peak files.  The sample sheet must be a tab- or
@@ -41,8 +41,8 @@ The pipeline performs the following steps:
 2. Construction of consensus peaks across samples.
 3. Counting read overlaps per consensus peak using deepTools
    ``multiBamSummary``.
-4. Differential analysis with PyDESeq2 (replicated designs) or the
-   MARS method (no replicates).
+4. Formal differential inference with PyDESeq2 for replicated designs, or
+   exploratory effect-size/MARS-derived ranking for exact 1-vs-1 designs.
 5. Optional annotation against a GTF file and Enrichr enrichment via
    gseapy.
 6. Plot generation (volcano, MA, correlation, heatmap) and metadata
@@ -54,17 +54,19 @@ pyranges, gseapy, MACS2, deepTools.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import logging
 import math
-import os
+import platform
 import shutil
 import subprocess
 import sys
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set
 
 import numpy as np
 import pandas as pd
@@ -95,6 +97,17 @@ except ImportError:  # pragma: no cover - optional dependency
 import peak_shape
 from io_utils import ensure_integer_columns, read_bed_frame
 from motif_ranking import run_pairwise_motif_ranking
+
+
+__version__ = "0.2.3"
+
+SAM_PROPER_PAIR = 0x2
+SAM_UNMAPPED = 0x4
+SAM_FIRST_MATE = 0x40
+SAM_SECONDARY = 0x100
+SAM_QCFAIL = 0x200
+SAM_DUPLICATE = 0x400
+SAM_SUPPLEMENTARY = 0x800
 
 
 def _detect_macs_command() -> str:
@@ -168,6 +181,67 @@ class SampleEntry:
             raise FileNotFoundError(f"Peak file not found for sample {self.sample}: {self.peaks}")
 
 
+@dataclass(frozen=True)
+class CountFilterConfig:
+    """Filtering and count-unit definition shared by counting and library size.
+
+    ``fragment`` mode counts the first mate of each proper pair once and asks
+    deepTools to extend that mate across the complete paired-end fragment.
+    This makes interval counts and the selected library-size denominator use
+    the same countable unit. Tn5 insertion-site counting is intentionally not
+    implemented.
+    """
+
+    count_unit: str = "read"
+    min_mapq: int = 0
+    exclude_duplicates: bool = False
+    proper_pairs_only: bool = False
+    sam_flag_exclude: int = 0
+
+    def validate(self) -> None:
+        if self.count_unit not in {"read", "fragment"}:
+            raise ValueError("count_unit must be either 'read' or 'fragment'")
+        if self.min_mapq < 0:
+            raise ValueError("min_mapq must be non-negative")
+        if self.sam_flag_exclude < 0:
+            raise ValueError("sam_flag_exclude must be non-negative")
+
+    @property
+    def effective_exclude_flags(self) -> int:
+        flags = (
+            SAM_UNMAPPED
+            | SAM_SECONDARY
+            | SAM_QCFAIL
+            | SAM_SUPPLEMENTARY
+            | int(self.sam_flag_exclude)
+        )
+        if self.exclude_duplicates:
+            flags |= SAM_DUPLICATE
+        return flags
+
+    def effective_include_flags(self, *, paired_end: bool) -> int:
+        if self.count_unit == "fragment":
+            if not paired_end:
+                raise ValueError("fragment counting requires a paired-end BAM")
+            return SAM_FIRST_MATE | SAM_PROPER_PAIR
+        if self.proper_pairs_only:
+            if not paired_end:
+                raise ValueError("proper-pairs-only filtering requires a paired-end BAM")
+            return SAM_PROPER_PAIR
+        return 0
+
+    def as_metadata(self) -> Dict[str, object]:
+        return {
+            "count_unit": self.count_unit,
+            "min_mapq": self.min_mapq,
+            "exclude_duplicates": self.exclude_duplicates,
+            "proper_pairs_only": self.proper_pairs_only or self.count_unit == "fragment",
+            "sam_flag_exclude_requested": self.sam_flag_exclude,
+            "sam_flag_exclude_effective": self.effective_exclude_flags,
+            "tn5_insertion_site_counting": False,
+        }
+
+
 # ---------------------------------------------------------------------------
 # File and command helpers
 # ---------------------------------------------------------------------------
@@ -220,6 +294,79 @@ def run_command(cmd: Sequence[str], *, workdir: Optional[Path] = None, log: bool
 def ensure_directory(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def git_state() -> Dict[str, object]:
+    """Return the source commit and dirty-state flag for result provenance."""
+
+    repo = Path(__file__).resolve().parent
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "commit": commit.stdout.strip() if commit.returncode == 0 else None,
+        "dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
+    }
+
+
+def _command_version(command: str, *args: str) -> Optional[str]:
+    resolved = shutil.which(command)
+    if resolved is None:
+        return None
+    completed = subprocess.run(
+        [resolved, *args],
+        check=False,
+        capture_output=True,
+    )
+    combined = b"\n".join(part for part in (completed.stdout, completed.stderr) if part).decode(
+        "utf-8", errors="replace"
+    )
+    first_line = next((line.strip() for line in combined.splitlines() if line.strip()), None)
+    return first_line
+
+
+def software_versions() -> Dict[str, object]:
+    packages = {}
+    for package in (
+        "deeptools",
+        "gseapy",
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "pydeseq2",
+        "pyranges",
+        "pysam",
+        "scipy",
+        "seaborn",
+        "statsmodels",
+    ):
+        try:
+            packages[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            packages[package] = None
+    return {
+        "peakforge": __version__,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "python_packages": packages,
+        "external_tools": {
+            "samtools": _command_version("samtools", "--version"),
+            "multiBamSummary": _command_version("multiBamSummary", "--version"),
+            "macs3": _command_version("macs3", "--version"),
+            "macs2": _command_version("macs2", "--version"),
+        },
+    }
 
 
 def _bam_index_candidates(bam: Path) -> List[Path]:
@@ -302,12 +449,102 @@ def bam_total_mapped_reads(bam: Path, samtools_path: str, threads: int = 1) -> i
     return total
 
 
-def compute_library_sizes(samples: Sequence[SampleEntry], samtools_path: str, threads: int = 1) -> pd.Series:
-    sizes = {}
+def samtools_count_units(
+    bam: Path,
+    samtools_path: str,
+    *,
+    min_mapq: int,
+    exclude_flags: int,
+    include_flags: int = 0,
+    threads: int = 1,
+) -> int:
+    """Count alignments matching an explicit samtools flag/MAPQ definition."""
+
+    cmd = [samtools_path, "view", "-c", "-q", str(min_mapq), "-F", str(exclude_flags)]
+    if include_flags:
+        cmd.extend(["-f", str(include_flags)])
+    if threads > 1:
+        cmd.extend(["-@", str(threads)])
+    cmd.append(str(bam))
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"samtools view failed for {bam} with exit code {result.returncode}: "
+            f"{result.stderr.strip()}"
+        )
+    try:
+        return int(result.stdout.strip() or 0)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Unable to parse samtools count for {bam}: {result.stdout!r}"
+        ) from exc
+
+
+def compute_library_size_metrics(
+    samples: Sequence[SampleEntry],
+    samtools_path: str,
+    count_config: CountFilterConfig,
+    threads: int = 1,
+) -> pd.DataFrame:
+    """Return raw, filtered-alignment, and selected count-unit totals."""
+
+    count_config.validate()
+    records: List[Dict[str, object]] = []
     for sample in samples:
         logging.info("Estimating library size for sample %s", sample.sample)
-        sizes[sample.sample] = bam_total_mapped_reads(sample.bam, samtools_path, threads)
-    return pd.Series(sizes, dtype=float)
+        paired_end = bool(sample.is_paired)
+        countable_include = count_config.effective_include_flags(paired_end=paired_end)
+        alignment_include = (
+            SAM_PROPER_PAIR
+            if (count_config.proper_pairs_only or count_config.count_unit == "fragment")
+            else 0
+        )
+        raw_mapped = bam_total_mapped_reads(sample.bam, samtools_path, threads)
+        filtered_alignments = samtools_count_units(
+            sample.bam,
+            samtools_path,
+            min_mapq=count_config.min_mapq,
+            exclude_flags=count_config.effective_exclude_flags,
+            include_flags=alignment_include,
+            threads=threads,
+        )
+        filtered_units = samtools_count_units(
+            sample.bam,
+            samtools_path,
+            min_mapq=count_config.min_mapq,
+            exclude_flags=count_config.effective_exclude_flags,
+            include_flags=countable_include,
+            threads=threads,
+        )
+        if filtered_units <= 0:
+            raise ValueError(
+                f"No countable {count_config.count_unit} units remain after filtering for {sample.sample}"
+            )
+        records.append(
+            {
+                "sample": sample.sample,
+                "paired_end": paired_end,
+                "raw_mapped_alignments": raw_mapped,
+                "filtered_alignments": filtered_alignments,
+                "filtered_countable_units": filtered_units,
+                "selected_library_size": filtered_units,
+                **count_config.as_metadata(),
+            }
+        )
+    return pd.DataFrame.from_records(records).set_index("sample")
+
+
+def compute_library_sizes(
+    samples: Sequence[SampleEntry],
+    samtools_path: str,
+    threads: int = 1,
+    count_config: Optional[CountFilterConfig] = None,
+) -> pd.Series:
+    """Return selected library sizes under the same filters as interval counts."""
+
+    config = count_config or CountFilterConfig()
+    metrics = compute_library_size_metrics(samples, samtools_path, config, threads)
+    return metrics["selected_library_size"].astype(float)
 
 
 def read_table(path: Path) -> pd.DataFrame:
@@ -390,15 +627,75 @@ def infer_peak_type(path: Path, declared: str, default: str) -> str:
     return default
 
 
-def read_peak_file(path: Path, peak_type: str, peak_extension: int) -> pr.PyRanges:
-    """Load peaks into a :class:`pyranges.PyRanges` object."""
+def read_peak_file(
+    path: Path,
+    peak_type: str,
+    peak_edge_padding: int,
+    *,
+    peak_coordinate_mode: str = "edge-padding",
+    summit_fixed_width: int = 500,
+) -> pr.PyRanges:
+    """Load peaks using native/edge-padded or summit-centred coordinates.
+
+    ``edge-padding`` preserves the historical behaviour: the requested number
+    of bases is added to both native narrowPeak edges.  ``summit-fixed`` reads
+    the zero-based summit offset from narrowPeak column 10 and creates an exact
+    total-width interval around that summit.  Broad peaks do not define a
+    narrowPeak summit and therefore cannot use ``summit-fixed``.
+    """
+
+    if peak_edge_padding < 0:
+        raise ValueError("peak edge padding must be non-negative")
+
+    coordinate_mode = peak_coordinate_mode.replace("_", "-").lower()
+    if coordinate_mode not in {"edge-padding", "summit-fixed"}:
+        raise ValueError(
+            "peak coordinate mode must be 'edge-padding' or 'summit-fixed'"
+        )
+
+    if coordinate_mode == "summit-fixed":
+        if peak_type != "narrow":
+            raise ValueError("summit-fixed coordinates require narrowPeak input")
+        if summit_fixed_width <= 0:
+            raise ValueError("summit fixed width must be a positive integer")
+        narrowpeak_columns = (
+            "Chromosome",
+            "Start",
+            "End",
+            "Name",
+            "Score",
+            "Strand",
+            "SignalValue",
+            "PValue",
+            "QValue",
+            "SummitOffset",
+        )
+        frame = read_bed_frame(
+            path,
+            column_names=narrowpeak_columns,
+            min_columns=10,
+        )
+        frame = ensure_integer_columns(frame, ("Start", "End", "SummitOffset"))
+        native_width = frame["End"] - frame["Start"]
+        invalid = (frame["SummitOffset"] < 0) | (frame["SummitOffset"] >= native_width)
+        if invalid.any():
+            invalid_rows = ", ".join(str(index + 1) for index in frame.index[invalid][:5])
+            raise ValueError(
+                f"narrowPeak summit offset must lie within its interval in {path}; "
+                f"invalid data row(s): {invalid_rows}"
+            )
+        summit = frame["Start"].to_numpy() + frame["SummitOffset"].to_numpy()
+        start = np.maximum(summit - summit_fixed_width // 2, 0)
+        frame["Start"] = start
+        frame["End"] = start + summit_fixed_width
+        return pr.PyRanges(frame[["Chromosome", "Start", "End"]])
 
     frame = read_bed_frame(path)
     frame = ensure_integer_columns(frame, ("Start", "End"))
 
     if peak_type == "narrow":
-        start = frame["Start"].to_numpy() - peak_extension
-        end = frame["End"].to_numpy() + peak_extension
+        start = frame["Start"].to_numpy() - peak_edge_padding
+        end = frame["End"].to_numpy() + peak_edge_padding
         frame["Start"] = np.maximum(start, 0)
         frame["End"] = end
 
@@ -412,6 +709,10 @@ def _macs2_command(
     macs2_genome: str,
     macs2_qval: float,
     peak_type: str,
+    macs_format: str = "AUTO",
+    macs_nomodel: bool = False,
+    macs_shift: Optional[int] = None,
+    macs_extsize: Optional[int] = None,
     macs2_extra: Optional[List[str]] = None,
 ) -> tuple[list[str], Path]:
     ensure_directory(output_dir)
@@ -432,8 +733,32 @@ def _macs2_command(
     ]
     if sample.control_bam is not None:
         cmd.extend(["-c", str(sample.control_bam)])
-    if sample.is_paired:
-        cmd.extend(["-f", "BAMPE"])
+    resolved_format = macs_format.upper()
+    if resolved_format == "AUTO":
+        resolved_format = "BAMPE" if sample.is_paired else "BAM"
+    if resolved_format not in {"BAM", "BAMPE"}:
+        raise ValueError("macs_format must be AUTO, BAM, or BAMPE")
+    if resolved_format == "BAMPE":
+        if macs_shift not in {None, 0}:
+            raise ValueError(
+                "MACS paired-end BAMPE mode uses observed fragments and requires "
+                "macs_shift to be 0 or omitted"
+            )
+        if macs_extsize is not None:
+            raise ValueError(
+                "MACS paired-end BAMPE mode uses observed fragment lengths; "
+                "macs_extsize is only supported with read-based BAM mode"
+            )
+    cmd.extend(["-f", resolved_format])
+
+    if macs_nomodel:
+        cmd.append("--nomodel")
+    if macs_shift is not None:
+        cmd.extend(["--shift", str(macs_shift)])
+    if macs_extsize is not None:
+        if macs_extsize <= 0:
+            raise ValueError("macs_extsize must be positive")
+        cmd.extend(["--extsize", str(macs_extsize)])
 
     if peak_type == "broad":
         cmd.extend(["--broad"])
@@ -453,6 +778,10 @@ def call_macs2(
     macs2_genome: str,
     macs2_qval: float,
     peak_type: str,
+    macs_format: str = "AUTO",
+    macs_nomodel: bool = False,
+    macs_shift: Optional[int] = None,
+    macs_extsize: Optional[int] = None,
     macs2_extra: Optional[List[str]] = None,
 ) -> Path:
     """Call MACS2 for a sample and return the resulting peak file path."""
@@ -463,6 +792,10 @@ def call_macs2(
         macs2_genome=macs2_genome,
         macs2_qval=macs2_qval,
         peak_type=peak_type,
+        macs_format=macs_format,
+        macs_nomodel=macs_nomodel,
+        macs_shift=macs_shift,
+        macs_extsize=macs_extsize,
         macs2_extra=macs2_extra,
     )
     run_command(cmd)
@@ -483,10 +816,13 @@ class Macs2Job:
 def load_all_peaks(
     samples: List[SampleEntry],
     *,
-    peak_extension: int,
+    peak_edge_padding: int,
+    peak_coordinate_mode: str,
+    summit_fixed_width: int,
     default_peak_type: str,
-    macs2_params: Dict[str, str],
+    macs2_params: Dict[str, object],
     peak_output_dir: Path,
+    command_log: Optional[List[List[str]]] = None,
 ) -> Dict[str, pr.PyRanges]:
     """Ensure every sample has peak calls and return PyRanges per sample."""
 
@@ -503,8 +839,14 @@ def load_all_peaks(
                 macs2_genome=macs2_params["genome"],
                 macs2_qval=float(macs2_params["qvalue"]),
                 peak_type=peak_type,
+                macs_format=str(macs2_params.get("format", "AUTO")),
+                macs_nomodel=bool(macs2_params.get("nomodel", False)),
+                macs_shift=macs2_params.get("shift"),
+                macs_extsize=macs2_params.get("extsize"),
                 macs2_extra=macs2_params.get("extra", []),
             )
+            if command_log is not None:
+                command_log.append(list(cmd))
             process = subprocess.Popen(cmd)
             macs2_jobs.append(
                 Macs2Job(
@@ -519,7 +861,13 @@ def load_all_peaks(
             peak_path = sample.peaks
             logging.info("Using provided peaks for sample %s (%s)", sample.sample, peak_type)
 
-            pr_obj = read_peak_file(Path(peak_path), peak_type, peak_extension)
+            pr_obj = read_peak_file(
+                Path(peak_path),
+                peak_type,
+                peak_edge_padding,
+                peak_coordinate_mode=peak_coordinate_mode,
+                summit_fixed_width=summit_fixed_width,
+            )
             df = pr_obj.df
             df["Sample"] = sample.sample
             pr_obj = pr.PyRanges(df)
@@ -541,7 +889,13 @@ def load_all_peaks(
                 f"MACS2 output not found for sample {job.sample.sample}: {job.peak_path}"
             )
 
-        pr_obj = read_peak_file(Path(job.peak_path), job.peak_type, peak_extension)
+        pr_obj = read_peak_file(
+            Path(job.peak_path),
+            job.peak_type,
+            peak_edge_padding,
+            peak_coordinate_mode=peak_coordinate_mode,
+            summit_fixed_width=summit_fixed_width,
+        )
         df = pr_obj.df
         df["Sample"] = job.sample.sample
         pr_obj = pr.PyRanges(df)
@@ -896,8 +1250,47 @@ def filter_consensus_by_sequence_mask(
 # ---------------------------------------------------------------------------
 
 
-def run_multibamsummary(consensus_bed: Path, samples: List[SampleEntry], output_dir: Path,
-                        threads: int = 1) -> Path:
+def canonicalize_count_rows(counts: pd.DataFrame) -> pd.DataFrame:
+    """Return interval-count rows in a deterministic genomic order.
+
+    ``multiBamSummary`` may emit the same BED intervals in different row orders
+    when worker scheduling changes.  Sorting before statistical analysis keeps
+    PyDESeq2 input order and tie-broken exploratory ranks reproducible across
+    thread counts and repeated runs.
+    """
+
+    required = ["Chromosome", "start", "end"]
+    missing = [column for column in required if column not in counts.columns]
+    if missing:
+        raise ValueError(
+            "Counts matrix is missing canonical coordinate columns: "
+            + ", ".join(missing)
+        )
+    return counts.sort_values(required, kind="mergesort").reset_index(drop=True)
+
+
+def run_multibamsummary(
+    consensus_bed: Path,
+    samples: List[SampleEntry],
+    output_dir: Path,
+    *,
+    count_config: CountFilterConfig,
+    threads: int = 1,
+    command_log: Optional[List[List[str]]] = None,
+) -> Path:
+    """Count interval overlaps using the configured read or fragment unit."""
+
+    count_config.validate()
+    include_flags = {
+        count_config.effective_include_flags(paired_end=bool(sample.is_paired))
+        for sample in samples
+    }
+    if len(include_flags) != 1:
+        raise ValueError(
+            "All BAMs in one analysis must resolve to the same count-unit include flags"
+        )
+    include_flag = include_flags.pop()
+
     ensure_directory(output_dir)
     out_npz = output_dir / "counts.npz"
     out_tsv = output_dir / "counts.tsv"
@@ -911,6 +1304,8 @@ def run_multibamsummary(consensus_bed: Path, samples: List[SampleEntry], output_
     ]
     cmd.extend(str(sample.bam) for sample in samples)
     cmd.extend([
+        "--labels",
+        *(sample.sample for sample in samples),
         "--outFileName",
         str(out_npz),
         "--outRawCounts",
@@ -918,6 +1313,14 @@ def run_multibamsummary(consensus_bed: Path, samples: List[SampleEntry], output_
         "--numberOfProcessors",
         str(threads),
     ])
+    cmd.extend(["--minMappingQuality", str(count_config.min_mapq)])
+    cmd.extend(["--samFlagExclude", str(count_config.effective_exclude_flags)])
+    if include_flag:
+        cmd.extend(["--samFlagInclude", str(include_flag)])
+    if count_config.count_unit == "fragment":
+        cmd.append("--extendReads")
+    if command_log is not None:
+        command_log.append(list(cmd))
     run_command(cmd)
     if not out_tsv.exists():
         raise FileNotFoundError("multiBamSummary failed to produce counts TSV")
@@ -946,9 +1349,16 @@ def benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
     return pd.Series(adjusted, index=pvalues.index)
 
 
-def pydeseq2_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.DataFrame:
+def pydeseq2_differential(
+    counts: pd.DataFrame,
+    conditions: pd.Series,
+    *,
+    n_cpus: int = 1,
+) -> pd.DataFrame:
     if DeseqDataSet is None or DeseqStats is None:
         raise ImportError("pydeseq2 is required for the DESeq2 workflow but is not installed")
+    if n_cpus < 1:
+        raise ValueError("PyDESeq2 n_cpus must be at least 1")
 
     logging.info("Running PyDESeq2 differential analysis")
     samples = counts.columns.tolist()
@@ -961,10 +1371,19 @@ def pydeseq2_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.Dat
     contrast = condition_order[1]
 
     metadata = pd.DataFrame({"condition": cond.astype("category")}, index=samples)
-    dds = DeseqDataSet(counts=counts.T.astype(int), metadata=metadata, design="~condition")
+    dds = DeseqDataSet(
+        counts=counts.T.astype(int),
+        metadata=metadata,
+        design="~condition",
+        n_cpus=n_cpus,
+    )
     dds.deseq2()
 
-    stats = DeseqStats(dds, contrast=("condition", contrast, reference))
+    stats = DeseqStats(
+        dds,
+        contrast=("condition", contrast, reference),
+        n_cpus=n_cpus,
+    )
     stats.summary()
     res = stats.results_df.copy()
     res.index.name = "Peak"
@@ -981,34 +1400,67 @@ def pydeseq2_differential(counts: pd.DataFrame, conditions: pd.Series) -> pd.Dat
     result["padj"] = res["padj"].fillna(1.0)
     result["log2FC_shrunk"] = result["log2FC"]
     result["method"] = "pydeseq2"
+    result["analysis_mode"] = "replicate_supported_inference"
+    result["interpretation"] = "formal_inference_with_biological_replicates"
     return result
 
 
-def mars_differential(
-    counts: pd.DataFrame, conditions: pd.Series, library_sizes: pd.Series
-) -> pd.DataFrame:
-    """Implement the MARS method for designs without replicates."""
+def _rank_subset(
+    values: pd.Series,
+    eligible: pd.Series,
+    *,
+    ascending: bool,
+) -> pd.Series:
+    ranks = pd.Series(pd.NA, index=values.index, dtype="Int64")
+    mask = eligible.fillna(False) & values.notna()
+    if mask.any():
+        # Coordinate/peak identifiers provide a stable tie-break independent
+        # of the row order returned by the counting backend.
+        ordered = values.loc[mask].sort_index(kind="mergesort")
+        ranked = ordered.rank(method="first", ascending=ascending).astype("Int64")
+        ranks.loc[ranked.index] = ranked
+    return ranks
 
-    logging.info("Running MARS differential analysis (no replicates)")
+
+def single_pair_statistics(
+    counts: pd.DataFrame,
+    conditions: pd.Series,
+    library_sizes: pd.Series,
+    *,
+    minimum_mean_cpm: float = 1.0,
+    pseudocount: float = 0.5,
+) -> pd.DataFrame:
+    """Compute exploratory effect-size and MARS-derived single-pair rankings.
+
+    Sampling-model p/q values are retained as explicitly named diagnostics.
+    They do not estimate biological variability and must not be interpreted as
+    formal significance or FDR-controlled discoveries.
+    """
+
+    if minimum_mean_cpm < 0:
+        raise ValueError("minimum_mean_cpm must be non-negative")
+    if pseudocount <= 0:
+        raise ValueError("pseudocount must be positive")
+
+    logging.info("Running exploratory single-pair ranking")
     samples = counts.columns.tolist()
     cond_series = conditions.loc[samples]
     unique_conditions = list(dict.fromkeys(cond_series.tolist()))
     if len(unique_conditions) != 2:
-        raise ValueError("MARS method requires exactly two conditions")
+        raise ValueError("Single-pair ranking requires exactly two conditions")
 
-    reference, contrast = unique_conditions
-    contrast_cols = cond_series[cond_series == contrast].index
-    reference_cols = cond_series[cond_series == reference].index
+    condition_a, condition_b = unique_conditions
+    condition_a_cols = cond_series[cond_series == condition_a].index
+    condition_b_cols = cond_series[cond_series == condition_b].index
+    if len(condition_a_cols) != 1 or len(condition_b_cols) != 1:
+        raise ValueError(
+            "Exploratory single-pair mode requires exactly one sample per condition"
+        )
 
-    if contrast_cols.empty or reference_cols.empty:
-        raise ValueError("Each condition must contribute at least one sample for MARS analysis")
-
-    contrast_counts = counts.loc[:, contrast_cols].sum(axis=1)
-    reference_counts = counts.loc[:, reference_cols].sum(axis=1)
-
+    count_a = counts.loc[:, condition_a_cols].iloc[:, 0].astype(float)
+    count_b = counts.loc[:, condition_b_cols].iloc[:, 0].astype(float)
     if not isinstance(library_sizes, pd.Series):
         library_sizes = pd.Series(library_sizes)
-
     library_sizes = library_sizes.reindex(samples)
     if library_sizes.isna().any():
         missing = library_sizes[library_sizes.isna()].index.tolist()
@@ -1016,72 +1468,139 @@ def mars_differential(
             "Library size information missing for samples: " + ", ".join(missing)
         )
 
-    contrast_total = float(library_sizes.loc[list(contrast_cols)].sum())
-    reference_total = float(library_sizes.loc[list(reference_cols)].sum())
+    library_size_a = float(library_sizes.loc[list(condition_a_cols)].iloc[0])
+    library_size_b = float(library_sizes.loc[list(condition_b_cols)].iloc[0])
+    if library_size_a <= 0 or library_size_b <= 0:
+        raise ValueError("Library sizes must be positive for both single-pair samples")
 
-    if contrast_total <= 0 or reference_total <= 0:
-        raise ValueError("Total read counts must be positive for both conditions in MARS analysis")
+    c_a = count_a.to_numpy(dtype=float)
+    c_b = count_b.to_numpy(dtype=float)
+    if np.any(c_a < 0) or np.any(c_b < 0):
+        raise ValueError("Counts must be non-negative")
 
-    c1 = contrast_counts.to_numpy(dtype=float)
-    c2 = reference_counts.to_numpy(dtype=float)
+    cpm_a = c_a / library_size_a * 1_000_000.0
+    cpm_b = c_b / library_size_b * 1_000_000.0
+    mean_cpm = 0.5 * (cpm_a + cpm_b)
+    library_offset = math.log2(library_size_b / library_size_a)
+    normalized_log2fc = (
+        np.log2((c_b + pseudocount) / (c_a + pseudocount)) - library_offset
+    )
+
+    both_zero = (c_a == 0) & (c_b == 0)
+    one_zero = (c_a == 0) ^ (c_b == 0)
+    positive_counts = (c_a > 0) & (c_b > 0)
 
     with np.errstate(divide="ignore"):
-        log2_c1 = np.log2(c1)
-        log2_c2 = np.log2(c2)
+        log2_b = np.log2(c_b)
+        log2_a = np.log2(c_a)
+    valid_mask = positive_counts & np.isfinite(log2_b) & np.isfinite(log2_a)
 
-    valid_mask = np.isfinite(log2_c1) & np.isfinite(log2_c2)
+    M = np.full_like(c_a, np.nan, dtype=float)
+    A = np.full_like(c_a, np.nan, dtype=float)
+    M[valid_mask] = log2_b[valid_mask] - log2_a[valid_mask]
+    A[valid_mask] = 0.5 * (log2_b[valid_mask] + log2_a[valid_mask])
 
-    M = np.full_like(c1, np.nan, dtype=float)
-    A = np.full_like(c1, np.nan, dtype=float)
-    M[valid_mask] = log2_c1[valid_mask] - log2_c2[valid_mask]
-    A[valid_mask] = 0.5 * (log2_c1[valid_mask] + log2_c2[valid_mask])
-
-    sqrt_total = math.sqrt(contrast_total * reference_total)
+    sqrt_total = math.sqrt(library_size_b * library_size_a)
     p = np.full_like(M, np.nan, dtype=float)
     with np.errstate(divide="ignore", invalid="ignore"):
         p[valid_mask] = np.exp2(A[valid_mask]) / sqrt_total
-
     epsilon = 1e-12
     if np.any(valid_mask):
-        p_valid = p[valid_mask]
-        p_valid = np.clip(p_valid, epsilon, 1 - epsilon)
-        p[valid_mask] = p_valid
+        p[valid_mask] = np.clip(p[valid_mask], epsilon, 1 - epsilon)
 
     log_factor = math.log(2.0)
-    denom = (contrast_total + reference_total) * p
+    denom = (library_size_b + library_size_a) * p
     with np.errstate(divide="ignore", invalid="ignore"):
         variance = 4.0 * (1.0 - p) / (denom * (log_factor ** 2))
     sd = np.sqrt(variance)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        mean = (np.log(contrast_total * p) - np.log(reference_total * p)) / log_factor
+    expected_null_m = np.full_like(M, library_offset, dtype=float)
 
     z_scores = np.full_like(M, np.nan, dtype=float)
     valid_z = valid_mask & np.isfinite(sd) & (sd > 0)
-    z_scores[valid_z] = (M[valid_z] - mean[valid_z]) / sd[valid_z]
-
+    z_scores[valid_z] = (M[valid_z] - expected_null_m[valid_z]) / sd[valid_z]
     pvals = np.ones_like(M, dtype=float)
     finite_z = np.isfinite(z_scores)
     pvals[finite_z] = 2.0 * stats.norm.sf(np.abs(z_scores[finite_z]))
 
-    # Report effect size on the same library-size-normalized scale used by the
-    # MARS null, so the displayed fold-change zero matches the tested null.
-    library_offset = math.log2(contrast_total / reference_total)
-    log2fc_output = np.log2((c1 + 0.5) / (c2 + 0.5)) - library_offset
-
     res_df = pd.DataFrame(
         {
             "Peak": counts.index,
-            "log2FC": log2fc_output,
+            "condition_a": condition_a,
+            "condition_b": condition_b,
+            "count_condition_a": c_a,
+            "count_condition_b": c_b,
+            "library_size_a": library_size_a,
+            "library_size_b": library_size_b,
+            "cpm_condition_a": cpm_a,
+            "cpm_condition_b": cpm_b,
+            "mean_cpm": mean_cpm,
+            "normalized_log2fc": normalized_log2fc,
             "A": A,
             "M": M,
-            "pvalue": pvals,
-            "log2FC_shrunk": log2fc_output,
+            "expected_null_m": expected_null_m,
+            "mars_variance": variance,
+            "mars_sd": sd,
+            "mars_score": z_scores,
+            "sampling_pvalue": pvals,
         }
     ).set_index("Peak")
-    res_df["padj"] = benjamini_hochberg(res_df["pvalue"]).fillna(1.0)
-    res_df["method"] = "mars"
+    res_df["sampling_qvalue"] = benjamini_hochberg(
+        res_df["sampling_pvalue"]
+    ).fillna(1.0)
+    res_df["zero_count_status"] = np.select(
+        [both_zero, one_zero],
+        ["both_zero", "one_zero"],
+        default="both_positive",
+    )
+    res_df["rank_eligible"] = (~both_zero) & (res_df["mean_cpm"] >= minimum_mean_cpm)
+    res_df["rank_up"] = _rank_subset(
+        res_df["normalized_log2fc"],
+        res_df["rank_eligible"] & (res_df["normalized_log2fc"] > 0),
+        ascending=False,
+    )
+    res_df["rank_down"] = _rank_subset(
+        res_df["normalized_log2fc"],
+        res_df["rank_eligible"] & (res_df["normalized_log2fc"] < 0),
+        ascending=True,
+    )
+    res_df["rank_absolute_lfc"] = _rank_subset(
+        res_df["normalized_log2fc"].abs(),
+        res_df["rank_eligible"],
+        ascending=False,
+    )
+    res_df["rank_absolute_mars"] = _rank_subset(
+        res_df["mars_score"].abs(),
+        res_df["rank_eligible"] & res_df["mars_score"].notna(),
+        ascending=False,
+    )
+    res_df["method"] = "single_pair_effect_ranking_with_mars_diagnostic"
+    res_df["analysis_mode"] = "single_pair_exploratory"
+    res_df["interpretation"] = "ranking_only_no_biological_variance_estimation"
     return res_df
+
+
+def mars_differential(
+    counts: pd.DataFrame, conditions: pd.Series, library_sizes: pd.Series
+) -> pd.DataFrame:
+    """Deprecated compatibility wrapper for the exploratory single-pair API."""
+
+    warnings.warn(
+        "mars_differential() legacy pvalue/padj/log2FC aliases are deprecated; "
+        "use single_pair_statistics() and the explicit exploratory column names.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    result = single_pair_statistics(
+        counts,
+        conditions,
+        library_sizes,
+        minimum_mean_cpm=0.0,
+    )
+    result["log2FC"] = result["normalized_log2fc"]
+    result["log2FC_shrunk"] = result["normalized_log2fc"]
+    result["pvalue"] = result["sampling_pvalue"]
+    result["padj"] = result["sampling_qvalue"]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1090,7 +1609,13 @@ def mars_differential(
 
 
 def call_differential_analysis(
-    counts: pd.DataFrame, conditions: pd.Series, library_sizes: pd.Series
+    counts: pd.DataFrame,
+    conditions: pd.Series,
+    library_sizes: pd.Series,
+    *,
+    minimum_mean_cpm: float = 1.0,
+    pseudocount: float = 0.5,
+    pydeseq2_n_cpus: int = 1,
 ) -> pd.DataFrame:
     """Select and run the appropriate differential analysis workflow."""
 
@@ -1099,13 +1624,26 @@ def call_differential_analysis(
     if conditions.nunique() != 2:
         raise ValueError("Differential analysis requires exactly two experimental conditions")
 
-    replicates_per_condition = conditions.value_counts().min()
+    group_sizes = conditions.value_counts()
+    replicates_per_condition = group_sizes.min()
     if replicates_per_condition >= 2:
         logging.info("Detected replicates per condition; using DESeq2 analysis via PyDESeq2")
-        return pydeseq2_differential(counts, conditions)
+        return pydeseq2_differential(counts, conditions, n_cpus=pydeseq2_n_cpus)
 
-    logging.info("No replicates detected; using MARS analysis")
-    return mars_differential(counts, conditions, library_sizes)
+    if not (group_sizes == 1).all():
+        raise ValueError(
+            "PeakForge supports either at least two replicates in both groups or an exact 1-vs-1 "
+            "exploratory comparison; mixed replicated/unreplicated group sizes are unsupported"
+        )
+
+    logging.info("Detected exact 1-vs-1 design; using exploratory candidate ranking")
+    return single_pair_statistics(
+        counts,
+        conditions,
+        library_sizes,
+        minimum_mean_cpm=minimum_mean_cpm,
+        pseudocount=pseudocount,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1177,17 +1715,22 @@ def plot_volcano(results: pd.DataFrame, output: Path, padj_threshold: float = 0.
 
 
 def plot_ma(results: pd.DataFrame, counts: pd.DataFrame, output: Path) -> None:
-    base_mean = results.get("baseMean")
-    if base_mean is None:
-        base_mean = counts.mean(axis=1)
+    single_pair = "normalized_log2fc" in results.columns
+    if single_pair:
+        base_mean = results["mean_cpm"]
+        effect = results["normalized_log2fc"]
+    else:
+        base_mean = results.get("baseMean")
+        if base_mean is None:
+            base_mean = counts.mean(axis=1)
+        effect = results["log2FC"]
     fig, ax = plt.subplots(figsize=(6, 6))
     A = np.log2(base_mean + 1e-6)
-    M = results["log2FC"]
-    sns.scatterplot(x=A, y=M, ax=ax, s=10, color="steelblue")
+    sns.scatterplot(x=A, y=effect, ax=ax, s=10, color="steelblue")
     ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
-    ax.set_xlabel("Average log2 expression")
-    ax.set_ylabel("log2 Fold Change")
-    ax.set_title("MA plot")
+    ax.set_xlabel("Mean log2 CPM" if single_pair else "Average log2 count")
+    ax.set_ylabel("Normalized log2 fold change" if single_pair else "log2 fold change")
+    ax.set_title("Exploratory effect–abundance plot" if single_pair else "MA plot")
     save_plot(fig, output)
 
 
@@ -1200,15 +1743,49 @@ def plot_sample_correlation(counts: pd.DataFrame, output: Path) -> None:
 
 
 def plot_top_heatmap(counts: pd.DataFrame, results: pd.DataFrame, output: Path, top_n: int = 50) -> None:
-    top = results.sort_values("padj").head(top_n).index
+    if "rank_absolute_lfc" in results.columns:
+        top = results.sort_values("rank_absolute_lfc", na_position="last").head(top_n).index
+        title = f"Top {top_n} exploratory candidates by absolute effect"
+    else:
+        top = results.sort_values("padj").head(top_n).index
+        title = f"Top {top_n} differential peaks"
     data = counts.loc[top]
     log_data = np.log2(data + 1)
     norm = log_data.sub(log_data.mean(axis=1), axis=0)
     fig = plt.figure(figsize=(8, max(4, len(top) * 0.2)))
     sns.heatmap(norm, cmap="RdBu_r", center=0)
-    plt.title(f"Top {top_n} differential peaks")
+    plt.title(title)
     plt.ylabel("Peaks")
     plt.xlabel("Samples")
+    save_plot(fig, output)
+
+
+def plot_single_pair_ranking(results: pd.DataFrame, output: Path) -> None:
+    """Plot an exploratory effect-size ranking without significance thresholds."""
+
+    required = {"normalized_log2fc", "rank_absolute_lfc", "rank_eligible"}
+    missing = required - set(results.columns)
+    if missing:
+        raise ValueError(
+            "Single-pair ranking plot is missing columns: " + ", ".join(sorted(missing))
+        )
+    ranked = results.loc[results["rank_eligible"].fillna(False)].copy()
+    ranked = ranked.dropna(subset=["rank_absolute_lfc", "normalized_log2fc"])
+    ranked = ranked.sort_values("rank_absolute_lfc")
+    fig, ax = plt.subplots(figsize=(7, 5))
+    colors = np.where(ranked["normalized_log2fc"] >= 0, "#B2182B", "#2166AC")
+    ax.scatter(
+        ranked["rank_absolute_lfc"].astype(float),
+        ranked["normalized_log2fc"],
+        c=colors,
+        s=12,
+        alpha=0.65,
+        linewidths=0,
+    )
+    ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
+    ax.set_xlabel("Absolute-effect rank")
+    ax.set_ylabel("Normalized log2 fold change")
+    ax.set_title("Exploratory single-pair candidate ranking")
     save_plot(fig, output)
 
 
@@ -1260,7 +1837,7 @@ def plot_differential_summary(results: pd.DataFrame, output: Path, *, counts: Op
 
     fig, ax = plt.subplots(figsize=(8, max(4.0, len(df) * 0.45)))
     size_range = (80, 700)
-    scatter = sns.scatterplot(
+    sns.scatterplot(
         data=df,
         x="neg_log10_padj",
         y="Peak",
@@ -1329,6 +1906,19 @@ def generate_differential_plots(results: pd.DataFrame, counts: pd.DataFrame, out
     """Produce all differential analysis visualisations."""
 
     ensure_directory(output_dir)
+    if "normalized_log2fc" in results.columns:
+        outputs = {
+            "sample_correlation": output_dir / "sample_correlation.png",
+            "effect_abundance": output_dir / "effect_abundance.png",
+            "candidate_ranking": output_dir / "candidate_ranking.png",
+            "top_heatmap": output_dir / "top_candidate_heatmap.png",
+        }
+        plot_sample_correlation(counts, outputs["sample_correlation"])
+        plot_ma(results, counts, outputs["effect_abundance"])
+        plot_single_pair_ranking(results, outputs["candidate_ranking"])
+        plot_top_heatmap(counts, results, outputs["top_heatmap"])
+        return outputs
+
     outputs = {
         "sample_correlation": output_dir / "sample_correlation.png",
         "ma": output_dir / "ma_plot.png",
@@ -1423,9 +2013,24 @@ def run_pipeline(
     for sample in samples:
         sample.is_paired = detect_paired_end_bam(sample.bam, samtools_path, args.threads)
 
-    library_sizes = compute_library_sizes(samples, samtools_path, args.threads)
-
     results_dir = ensure_directory(Path(args.output_dir))
+    count_config = CountFilterConfig(
+        count_unit=getattr(args, "count_unit", "read"),
+        min_mapq=getattr(args, "min_mapq", 0),
+        exclude_duplicates=bool(getattr(args, "exclude_duplicates", False)),
+        proper_pairs_only=bool(getattr(args, "proper_pairs_only", False)),
+        sam_flag_exclude=getattr(args, "sam_flag_exclude", 0),
+    )
+    library_size_metrics = compute_library_size_metrics(
+        samples,
+        samtools_path,
+        count_config,
+        args.threads,
+    )
+    library_sizes = library_size_metrics["selected_library_size"].astype(float)
+    library_size_metrics_path = results_dir / "library_size_metrics.tsv"
+    library_size_metrics.to_csv(library_size_metrics_path, sep="\t")
+    executed_commands: List[List[str]] = []
 
     consensus: pr.PyRanges
     consensus_bed = results_dir / "consensus_peaks.bed"
@@ -1433,20 +2038,33 @@ def run_pipeline(
         "source": "generated" if consensus_path is None else "provided",
         "input": str(consensus_path) if consensus_path else None,
         "path": str(consensus_bed),
+        "peak_coordinate_definition": {
+            "applied_to_sample_peaks": consensus_path is None,
+            "mode": getattr(args, "peak_coordinate_mode", "edge-padding"),
+            "edge_padding_bp_per_side": getattr(args, "peak_edge_padding", 250),
+            "summit_fixed_total_width_bp": getattr(args, "summit_fixed_width", 500),
+        },
     }
 
     if consensus_path is None:
         macs2_params = {
             "genome": args.macs2_genome,
             "qvalue": args.macs2_qvalue,
+            "format": getattr(args, "macs_format", "AUTO"),
+            "nomodel": bool(getattr(args, "macs_nomodel", False)),
+            "shift": getattr(args, "macs_shift", None),
+            "extsize": getattr(args, "macs_extsize", None),
             "extra": args.macs2_extra,
         }
         peak_ranges = load_all_peaks(
             samples,
-            peak_extension=args.peak_extension,
+            peak_edge_padding=getattr(args, "peak_edge_padding", 250),
+            peak_coordinate_mode=getattr(args, "peak_coordinate_mode", "edge-padding"),
+            summit_fixed_width=getattr(args, "summit_fixed_width", 500),
             default_peak_type=args.peak_type,
             macs2_params=macs2_params,
             peak_output_dir=Path(args.peak_dir),
+            command_log=executed_commands,
         )
 
         consensus = build_consensus(peak_ranges, min_overlap=args.min_overlap)
@@ -1526,7 +2144,14 @@ def run_pipeline(
         if consensus_path.resolve() != consensus_bed.resolve():
             shutil.copyfile(consensus_path, consensus_bed)
 
-    counts_tsv = run_multibamsummary(consensus_bed, samples, results_dir / "counts", threads=args.threads)
+    counts_tsv = run_multibamsummary(
+        consensus_bed,
+        samples,
+        results_dir / "counts",
+        count_config=count_config,
+        threads=args.threads,
+        command_log=executed_commands,
+    )
     raw_counts = pd.read_csv(counts_tsv, sep="\t")
 
     # deepTools 3.5 switched to quoting header labels in TSV output.  Clean up
@@ -1567,6 +2192,10 @@ def run_pipeline(
             "Counts matrix is missing a chromosome column (expected one of #chr, #chrom, chrom)."
         )
     raw_counts.rename(columns={matched_chrom: "Chromosome"}, inplace=True)
+    raw_counts = canonicalize_count_rows(raw_counts)
+    # Replace the backend-specific raw ordering/header with the canonical count
+    # matrix used downstream so the persisted artifact is itself reproducible.
+    raw_counts.to_csv(counts_tsv, sep="\t", index=False)
 
     consensus_df = consensus.df.copy().rename(columns={"Start": "start", "End": "end"})
     merged = raw_counts.merge(consensus_df[["Chromosome", "start", "end", "Name"]],
@@ -1577,6 +2206,11 @@ def run_pipeline(
         + merged["start"].astype(int).astype(str)
         + "-"
         + merged["end"].astype(int).astype(str)
+    )
+    merged.sort_values(
+        ["Chromosome", "start", "end", "Peak"],
+        kind="mergesort",
+        inplace=True,
     )
     count_cols = [col for col in merged.columns if col not in {"Chromosome", "start", "end", "Peak", "Name", "Support"}]
     counts_df = merged.set_index("Peak")[count_cols]
@@ -1592,7 +2226,14 @@ def run_pipeline(
         raise ValueError(f"Counts matrix missing columns for samples: {', '.join(missing_cols)}")
     counts_df = counts_df[[s.sample for s in samples]]
 
-    diff_res = call_differential_analysis(counts_df, conditions, library_sizes)
+    diff_res = call_differential_analysis(
+        counts_df,
+        conditions,
+        library_sizes,
+        minimum_mean_cpm=getattr(args, "single_pair_min_mean_cpm", 1.0),
+        pseudocount=getattr(args, "single_pair_pseudocount", 0.5),
+        pydeseq2_n_cpus=getattr(args, "pydeseq2_cpus", 1),
+    )
 
     diff_path = results_dir / "differential_results.tsv"
     diff_res.to_csv(diff_path, sep="\t")
@@ -1638,7 +2279,18 @@ def run_pipeline(
         elif annotation_df is None or "NearestGene" not in annotation_df.columns:
             logging.warning("Annotation required for Enrichr; provide --gtf to map peaks to genes")
         else:
-            top_peaks = diff_res.sort_values("padj").head(args.enrichr_top).index
+            if "rank_absolute_lfc" in diff_res.columns:
+                top_peaks = (
+                    diff_res.loc[diff_res["rank_eligible"].fillna(False)]
+                    .sort_values("rank_absolute_lfc", na_position="last")
+                    .head(args.enrichr_top)
+                    .index
+                )
+                logging.warning(
+                    "Single-pair Enrichr input is an exploratory effect-size ranking, not a set of significant peaks"
+                )
+            else:
+                top_peaks = diff_res.sort_values("padj").head(args.enrichr_top).index
             gene_map = annotation_df.set_index("Name")["NearestGene"].dropna()
             top_genes = gene_map.reindex(top_peaks).dropna().unique().tolist()
             if not top_genes:
@@ -1657,12 +2309,24 @@ def run_pipeline(
                 "peaks": str(sample.peaks) if sample.peaks is not None else None,
                 "peak_type": sample.peak_type,
                 "library_size": float(library_sizes.loc[sample.sample]),
+                "library_size_metrics": {
+                    key: (
+                        value.item()
+                        if isinstance(value, np.generic)
+                        else value
+                    )
+                    for key, value in library_size_metrics.loc[sample.sample].to_dict().items()
+                },
             }
         )
 
     args_dict = {key: value for key, value in vars(args).items() if key != "samples"}
     metadata = {
         "timestamp": datetime.utcnow().isoformat(),
+        "peakforge_version": __version__,
+        "git": git_state(),
+        "software_versions": software_versions(),
+        "invocation": [sys.executable, *sys.argv],
         "args": args_dict,
         "metadata_sheet": str(metadata_path) if metadata_path else None,
         "samples": sample_metadata,
@@ -1675,6 +2339,12 @@ def run_pipeline(
         "annotation": str(annotation_path) if annotation_path else None,
         "enrichr": str(enrichr_path) if enrichr_path else None,
         "library_sizes": {name: float(value) for name, value in library_sizes.to_dict().items()},
+        "library_size_metrics": str(library_size_metrics_path),
+        "count_filter": count_config.as_metadata(),
+        "executed_commands": executed_commands,
+        "analysis_mode": str(diff_res["analysis_mode"].iloc[0])
+        if "analysis_mode" in diff_res.columns and not diff_res.empty
+        else None,
         "consensus": consensus_metadata,
     }
     save_metadata(metadata, results_dir / "metadata.json")
@@ -1822,10 +2492,34 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         help="Default peak type when calling MACS2",
     )
     parser.add_argument(
+        "--peak-edge-padding",
         "--peak-extension",
+        dest="peak_edge_padding",
         type=int,
         default=250,
-        help="Extension for narrow peaks when building consensus windows (bp)",
+        help=(
+            "Base pairs added to each original narrow-peak interval edge before consensus "
+            "construction; does not use the midpoint or summit"
+        ),
+    )
+    parser.add_argument(
+        "--peak-coordinate-mode",
+        choices=["edge-padding", "summit-fixed"],
+        default="edge-padding",
+        help=(
+            "Coordinate definition used before consensus construction: edge-padding keeps "
+            "native narrowPeak boundaries plus --peak-edge-padding; summit-fixed uses "
+            "narrowPeak column 10 as the centre of an exact-width interval"
+        ),
+    )
+    parser.add_argument(
+        "--summit-fixed-width",
+        type=int,
+        default=500,
+        help=(
+            "Exact total interval width in bp when --peak-coordinate-mode summit-fixed; "
+            "ignored in edge-padding mode"
+        ),
     )
     parser.add_argument(
         "--min-overlap",
@@ -1836,10 +2530,81 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--macs2-genome", default="hs", help="MACS2 genome size (e.g. hs, mm, 2.7e9)")
     parser.add_argument("--macs2-qvalue", type=float, default=0.01, help="MACS2 q-value cutoff")
     parser.add_argument(
+        "--macs-format",
+        choices=["AUTO", "BAM", "BAMPE"],
+        default="AUTO",
+        help="MACS input format; AUTO resolves BAMPE for paired-end BAMs and BAM otherwise",
+    )
+    parser.add_argument(
+        "--macs-nomodel",
+        action="store_true",
+        help="Pass --nomodel to MACS",
+    )
+    parser.add_argument(
+        "--macs-shift",
+        type=int,
+        default=None,
+        help="Pass an assay-specific --shift value to MACS",
+    )
+    parser.add_argument(
+        "--macs-extsize",
+        type=int,
+        default=None,
+        help="Pass an assay-specific --extsize value to MACS",
+    )
+    parser.add_argument(
         "--macs2-extra",
+        "--macs-extra",
+        dest="macs2_extra",
         nargs=argparse.REMAINDER,
         default=[],
         help="Additional arguments for MACS2",
+    )
+    parser.add_argument(
+        "--count-unit",
+        choices=["read", "fragment"],
+        default="read",
+        help=(
+            "Count aligned reads or paired-end DNA fragments; fragment mode counts one "
+            "proper pair once and extends the first mate across the fragment"
+        ),
+    )
+    parser.add_argument(
+        "--min-mapq",
+        type=int,
+        default=0,
+        help="Minimum mapping quality used for both interval counts and library size",
+    )
+    parser.add_argument(
+        "--exclude-duplicates",
+        action="store_true",
+        help="Exclude alignments marked as PCR/optical duplicates from counts and library size",
+    )
+    parser.add_argument(
+        "--proper-pairs-only",
+        action="store_true",
+        help="Restrict read mode to proper pairs; fragment mode always requires proper pairs",
+    )
+    parser.add_argument(
+        "--sam-flag-exclude",
+        type=int,
+        default=0,
+        help=(
+            "Additional SAM flag bitmask to exclude; unmapped, secondary, QC-fail, and "
+            "supplementary alignments are always excluded"
+        ),
+    )
+    parser.add_argument(
+        "--single-pair-min-mean-cpm",
+        type=float,
+        default=1.0,
+        help="Minimum mean CPM for eligibility in exploratory single-pair ranking",
+    )
+    parser.add_argument(
+        "--single-pair-pseudocount",
+        type=float,
+        default=0.5,
+        help="Count-scale pseudocount for exploratory normalized single-pair log2 fold change",
     )
     parser.add_argument(
         "--blacklist-bed",
@@ -1864,9 +2629,12 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--motif-score-metric",
-        default="signed_product",
-        choices=["signed_product", "signed_log10p", "signed_lfc"],
-        help="Peak ranking metric used before motif enrichment scoring",
+        default="auto",
+        choices=["auto", "signed_product", "signed_log10p", "signed_lfc", "signed_mars"],
+        help=(
+            "Peak ranking metric used before motif enrichment; auto uses signed normalized "
+            "log2FC for single-pair output and signed effect-by-pvalue for replicated output"
+        ),
     )
     parser.add_argument(
         "--motif-gsea-weight",
@@ -1910,6 +2678,12 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
         default=16,
         help="Threads for multiBamSummary (--numberOfProcessors)",
     )
+    parser.add_argument(
+        "--pydeseq2-cpus",
+        type=int,
+        default=1,
+        help="Worker processes used by PyDESeq2 in replicate-supported mode",
+    )
     parser.add_argument("--gtf", help="Optional GTF file for annotation")
     parser.add_argument("--enrichr", action="store_true", help="Run Enrichr GO Biological Process analysis")
     parser.add_argument("--enrichr-top", type=int, default=200, help="Number of top peaks for enrichment")
@@ -1919,7 +2693,10 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="peakforge",
-        description="CUT&Tag / ChIP-seq differential analysis pipeline",
+        description=(
+            "Two-group narrow-peak workflow with replicate-supported inference and "
+            "exploratory exact-1-vs-1 ranking"
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)

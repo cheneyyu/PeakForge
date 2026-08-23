@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -158,17 +158,9 @@ def motif_name_from_column(column_name: str) -> str:
 def build_ranked_peak_table(
     diff_res: pd.DataFrame,
     *,
-    score_metric: str = "signed_product",
+    score_metric: str = "auto",
 ) -> pd.DataFrame:
     """Create a signed, preranked peak table suitable for motif scoring."""
-
-    required = {"log2FC", "pvalue"}
-    missing = required - set(diff_res.columns)
-    if missing:
-        raise ValueError(
-            "Differential results are missing required columns for motif ranking: "
-            + ", ".join(sorted(missing))
-        )
 
     peak_labels = (
         diff_res["Peak"].astype(str)
@@ -177,33 +169,77 @@ def build_ranked_peak_table(
     )
     ranked = diff_res.copy().reset_index(drop=True)
     ranked["Peak"] = peak_labels.to_numpy()
-    effect_col = "log2FC_shrunk" if "log2FC_shrunk" in ranked.columns else "log2FC"
-    effect = ranked[effect_col].astype(float).fillna(0.0)
-
-    pvalues = ranked["pvalue"].astype(float).replace([np.inf, -np.inf], np.nan).fillna(1.0)
-    positive = pvalues[pvalues > 0]
-    floor = float(positive.min() / 10.0) if not positive.empty else 1e-300
-    floor = max(floor, 1e-300)
-    clipped_p = pvalues.clip(lower=floor, upper=1.0)
-    neglog10_p = -np.log10(clipped_p)
-
-    if score_metric == "signed_product":
-        rank_score = effect * neglog10_p
-    elif score_metric == "signed_log10p":
-        rank_score = np.sign(effect) * neglog10_p
-    elif score_metric == "signed_lfc":
-        rank_score = effect
+    single_pair = "normalized_log2fc" in ranked.columns
+    if single_pair:
+        effect_col = "normalized_log2fc"
+        effect = ranked[effect_col].astype(float).fillna(0.0)
+        if score_metric in {"auto", "signed_lfc"}:
+            rank_score = effect
+            resolved_metric = "signed_normalized_log2fc"
+        elif score_metric == "signed_mars":
+            if "mars_score" not in ranked.columns:
+                raise ValueError("signed_mars ranking requires a mars_score column")
+            rank_score = ranked["mars_score"].astype(float).fillna(0.0)
+            resolved_metric = "signed_mars_score"
+        elif score_metric in {"signed_product", "signed_log10p"}:
+            raise ValueError(
+                "Sampling p/q values cannot be used for single-pair motif candidate selection; "
+                "use signed_lfc or signed_mars"
+            )
+        else:
+            raise ValueError(
+                f"Unsupported motif score metric '{score_metric}' for single-pair output"
+            )
+        if "rank_eligible" in ranked.columns:
+            rank_score = rank_score.where(ranked["rank_eligible"].fillna(False), 0.0)
+        ranked["motif_rank_score"] = rank_score
+        ranked["motif_rank_weight"] = np.abs(rank_score)
+        ranked["motif_rank_metric"] = resolved_metric
+        sort_cols = ["motif_rank_score", effect_col]
+        ascending = [False, False]
+        if "mean_cpm" in ranked.columns:
+            sort_cols.append("mean_cpm")
+            ascending.append(False)
+        sort_cols.append("Peak")
+        ascending.append(True)
     else:
-        raise ValueError(
-            f"Unsupported motif score metric '{score_metric}'. "
-            "Expected one of: signed_product, signed_log10p, signed_lfc."
-        )
+        required = {"log2FC", "pvalue", "padj"}
+        missing = required - set(ranked.columns)
+        if missing:
+            raise ValueError(
+                "Differential results are missing required columns for motif ranking: "
+                + ", ".join(sorted(missing))
+            )
+        effect_col = "log2FC_shrunk" if "log2FC_shrunk" in ranked.columns else "log2FC"
+        effect = ranked[effect_col].astype(float).fillna(0.0)
+        pvalues = ranked["pvalue"].astype(float).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+        positive = pvalues[pvalues > 0]
+        floor = float(positive.min() / 10.0) if not positive.empty else 1e-300
+        floor = max(floor, 1e-300)
+        clipped_p = pvalues.clip(lower=floor, upper=1.0)
+        neglog10_p = -np.log10(clipped_p)
 
-    ranked["motif_rank_score"] = rank_score
-    ranked["motif_rank_weight"] = np.abs(rank_score)
+        resolved_metric = "signed_product" if score_metric == "auto" else score_metric
+        if resolved_metric == "signed_product":
+            rank_score = effect * neglog10_p
+        elif resolved_metric == "signed_log10p":
+            rank_score = np.sign(effect) * neglog10_p
+        elif resolved_metric == "signed_lfc":
+            rank_score = effect
+        else:
+            raise ValueError(
+                f"Unsupported motif score metric '{score_metric}'. "
+                "Expected one of: auto, signed_product, signed_log10p, signed_lfc."
+            )
+        ranked["motif_rank_score"] = rank_score
+        ranked["motif_rank_weight"] = np.abs(rank_score)
+        ranked["motif_rank_metric"] = resolved_metric
+        sort_cols = ["motif_rank_score", effect_col, "padj", "pvalue", "Peak"]
+        ascending = [False, False, True, True, True]
+
     ranked = ranked.sort_values(
-        ["motif_rank_score", effect_col, "padj", "pvalue", "Peak"],
-        ascending=[False, False, True, True, True],
+        sort_cols,
+        ascending=ascending,
         na_position="last",
     ).reset_index(drop=True)
     ranked["motif_rank"] = np.arange(1, len(ranked) + 1)
@@ -532,7 +568,7 @@ def run_pairwise_motif_ranking(
     motif_file: Optional[Path] = None,
     positive_condition: str,
     negative_condition: str,
-    score_metric: str = "signed_product",
+    score_metric: str = "auto",
     gsea_weight: float = 1.0,
     min_peaks: int = 10,
     max_fraction: float = 0.8,
