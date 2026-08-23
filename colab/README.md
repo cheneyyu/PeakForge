@@ -14,7 +14,7 @@ Colab is not the best environment for the full public ENCODE benchmark because:
 - Colab VM disk and session lifetime are limited
 - repeated indexing and peak calling can be slow on ephemeral machines
 
-The quickstart provides editable replicate-supported and exact 1-vs-1 command templates, along with cells for inspecting results and run provenance.
+The quickstart provides editable replicate-supported and exact 1-vs-1 command templates, along with cells for inspecting results and run provenance. Its optional `encode` input mode downloads a public K562-versus-HepG2 MYC ChIP-seq 2-vs-2 example and matched input controls directly from ENCODE. The six BAMs total approximately 2.23 GB before indexes.
 
 ## Recommended Colab workflow
 
