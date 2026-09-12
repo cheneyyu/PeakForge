@@ -1,6 +1,21 @@
 # PeakForge
 
+## Google Colab
+
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/cheneyyu/PeakForge/blob/main/colab/PeakForge_Colab_Quickstart.ipynb)
+
+Open the quickstart using the badge above for upload, Google Drive, or direct ENCODE inputs. Its existing installation cell installs the tagged source with pip; it does not apply the dependency lock. See [Colab instructions](colab/README.md).
+
+The [release installer below](#install-a-released-version-recommended) is also usable in Colab as an alternative to that installation cell. Install uv and samtools first, run it with `--env /content/peakforge-0.2.3`, then make its commands available to the analysis cells:
+
+```python
+import os
+os.environ["PATH"] = "/content/peakforge-0.2.3/bin:" + os.environ["PATH"]
+```
+
+This optional route keeps PeakForge in a separate Python environment without replacing Colab's notebook kernel.
+
+## Overview
 
 PeakForge is a Python-native toolkit for two-group differential analysis of narrow-peak chromatin profiles. It implements two evidence levels:
 
@@ -36,19 +51,6 @@ macs3 --version
 The installer needs Python 3.10+ and defaults to an isolated Python 3.12 environment, downloading Python through uv if necessary. Select another release with `--version`; use a separate `--env` directory for each version. Repeating the command restores that environment's locked packages without changing your system or notebook packages. Existing unrelated environments are not overwritten. The installation path is tested on Linux; on macOS, install `samtools` and the compiler toolchain separately. Native Windows users should use WSL2.
 
 Release downloads and Python package artifacts are SHA-256 checked. The environment retains `peakforge-uv.lock`, `peakforge-requirements.txt`, and `peakforge-install.json`. Runtime Python dependencies are pinned; `samtools` and system build tools are supplied separately. Each analysis also records detected versions in `metadata.json`.
-
-### Google Colab
-
-Open the quickstart using the badge above for upload, Google Drive, or direct ENCODE inputs. Its existing installation cell installs the tagged source with pip; it does not apply the dependency lock. See [Colab instructions](colab/README.md).
-
-The release installer above is also usable in Colab as an alternative to that installation cell. Install uv and samtools first, run it with `--env /content/peakforge-0.2.3`, then make its commands available to the analysis cells:
-
-```python
-import os
-os.environ["PATH"] = "/content/peakforge-0.2.3/bin:" + os.environ["PATH"]
-```
-
-This optional route keeps PeakForge in a separate Python environment without replacing Colab's notebook kernel.
 
 ### Development checkout
 
