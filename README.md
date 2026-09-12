@@ -4,6 +4,8 @@
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/cheneyyu/PeakForge/blob/main/colab/PeakForge_Colab_Quickstart.ipynb)
 
+We provide [example workflows on GitHub](https://github.com/cheneyyu/PeakForge/tree/main/example), including ENCODE MYC ChIP-seq data downloads, replicate-supported 2-vs-2 analysis, and exploratory 1-vs-1 ranking.
+
 Open the quickstart using the badge above for upload, Google Drive, or direct ENCODE inputs. Its existing installation cell installs the tagged source with pip; it does not apply the dependency lock. See [Colab instructions](colab/README.md).
 
 The [release installer below](#install-a-released-version-recommended) is also usable in Colab as an alternative to that installation cell. Install uv and samtools first, run it with `--env /content/peakforge-0.2.3`, then make its commands available to the analysis cells:
