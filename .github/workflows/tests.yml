@@ -10,9 +10,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.7"
+          python-version: "3.12"
       - name: Install command-line dependency
         run: sudo apt-get update && sudo apt-get install -y samtools
       - name: Create locked environment
         run: uv sync --frozen --extra dev --extra macs3
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run --frozen --extra dev --extra macs3 pytest -q
+
+  release-installation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.7"
+      - name: Install system prerequisites
+        run: sudo apt-get update && sudo apt-get install -y samtools build-essential
+      - name: Install published wheel with its release lock
+        run: python scripts/install_release.py --version 0.2.3 --env "$RUNNER_TEMP/peakforge-0.2.3" --python 3.12
+      - name: Smoke-test the installed CLI outside the checkout
+        run: '"$RUNNER_TEMP/peakforge-0.2.3/bin/python" -I scripts/check_release_install.py --version 0.2.3'
+      - name: Verify repeat installation
+        run: python scripts/install_release.py --version 0.2.3 --env "$RUNNER_TEMP/peakforge-0.2.3" --python 3.12

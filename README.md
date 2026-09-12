@@ -11,19 +11,57 @@ The tested scope of this release is transcription-factor ChIP-seq and replicated
 
 ## Installation
 
-PeakForge requires Python 3.10 or newer, `samtools`, deepTools, and a working MACS2/MACS3 installation when peaks are not supplied.
+### Install a released version (recommended)
+
+PeakForge is distributed through [GitHub Releases](https://github.com/cheneyyu/PeakForge/releases). The installer downloads the selected release's wheel and uses the `uv.lock` included in that same release to install its Python dependencies, including deepTools and MACS3. It does not install PeakForge from PyPI or from the current development branch.
+
+On Linux or WSL2, install `samtools` and a compiler if they are not already available:
 
 ```bash
-git clone https://github.com/cheneyyu/PeakForge.git
-cd PeakForge
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync --extra macs3 --extra dev
-uv run peakforge --help
+sudo apt-get update
+sudo apt-get install -y samtools build-essential
+```
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
+
+```bash
+curl -fL https://raw.githubusercontent.com/cheneyyu/PeakForge/main/scripts/install_release.py -o install_release.py
+python3 install_release.py --version 0.2.3 --env ./peakforge-0.2.3
+source ./peakforge-0.2.3/bin/activate
+peakforge --help
 samtools --version
 macs3 --version
 ```
 
-Python dependencies are resolved in `pyproject.toml` and pinned in `uv.lock`. Each run also records the detected Python, package, and external-tool versions in `metadata.json`.
+The installer needs Python 3.10+ and defaults to an isolated Python 3.12 environment, downloading Python through uv if necessary. Select another release with `--version`; use a separate `--env` directory for each version. Repeating the command restores that environment's locked packages without changing your system or notebook packages. Existing unrelated environments are not overwritten. The installation path is tested on Linux; on macOS, install `samtools` and the compiler toolchain separately. Native Windows users should use WSL2.
+
+Release downloads and Python package artifacts are SHA-256 checked. The environment retains `peakforge-uv.lock`, `peakforge-requirements.txt`, and `peakforge-install.json`. Runtime Python dependencies are pinned; `samtools` and system build tools are supplied separately. Each analysis also records detected versions in `metadata.json`.
+
+### Google Colab
+
+Open the quickstart using the badge above for upload, Google Drive, or direct ENCODE inputs. Its existing installation cell installs the tagged source with pip; it does not apply the dependency lock. See [Colab instructions](colab/README.md).
+
+The release installer above is also usable in Colab as an alternative to that installation cell. Install uv and samtools first, run it with `--env /content/peakforge-0.2.3`, then make its commands available to the analysis cells:
+
+```python
+import os
+os.environ["PATH"] = "/content/peakforge-0.2.3/bin:" + os.environ["PATH"]
+```
+
+This optional route keeps PeakForge in a separate Python environment without replacing Colab's notebook kernel.
+
+### Development checkout
+
+For development or running repository tests, use the source checkout instead:
+
+```bash
+git clone https://github.com/cheneyyu/PeakForge.git
+cd PeakForge
+uv sync --frozen --extra macs3 --extra dev
+uv run --frozen peakforge --help
+```
+
+The examples below assume the release environment has been activated. In a development checkout, prefix commands with `uv run --frozen`.
 
 ## Inputs
 
@@ -34,7 +72,7 @@ Matched input/control BAMs are passed only to MACS peak calling with `-c`. They 
 ## Replicate-supported TF ChIP-seq example
 
 ```bash
-uv run peakforge runmode \
+peakforge runmode \
   --condition-a K562 \
   --a-bams K562_rep1.bam K562_rep2.bam K562_rep3.bam \
   --a-controls K562_input.bam \
@@ -55,7 +93,7 @@ These ENCODE MYC benchmark BAMs are single-end. For paired-end ChIP-seq, use `--
 ## Replicate-supported paired-end ATAC-seq example
 
 ```bash
-uv run peakforge runmode \
+peakforge runmode \
   --condition-a condition_A \
   --a-bams A_rep1.bam A_rep2.bam A_rep3.bam \
   --condition-b condition_B \
@@ -102,7 +140,7 @@ of backend thread scheduling.
 Alternatively, `--peak-coordinate-mode summit-fixed --summit-fixed-width W` reads the zero-based summit offset from narrowPeak column 10 and replaces every sample peak with an exact total-width `W`-bp interval centered on that summit before consensus clustering. Near chromosome position zero, the interval is shifted right to retain the requested width. This mode requires valid narrowPeak summit fields and is rejected for broadPeak inputs. Coordinate transformation is not applied when `--consensus-peaks` supplies an already constructed interval set.
 
 ```bash
-uv run peakforge tsvmode samples.tsv \
+peakforge tsvmode samples.tsv \
   --peak-coordinate-mode summit-fixed \
   --summit-fixed-width 500 \
   --min-overlap 2 \
@@ -144,7 +182,7 @@ For backward-compatible Python API use, `mars_differential()` temporarily expose
 ## Reusing a fixed consensus
 
 ```bash
-uv run peakforge runmode \
+peakforge runmode \
   --condition-a K562 \
   --a-bams K562_rep1.bam K562_rep2.bam K562_rep3.bam \
   --condition-b HepG2 \
@@ -171,7 +209,7 @@ Every run writes `metadata.json` containing:
 - requested peak-coordinate mode, edge padding, summit width, and whether the transformation was applied;
 - explicit analysis mode and interpretation.
 
-For reproducible production runs, use a clean version-controlled commit; `metadata.json` records the commit and whether the working tree was dirty.
+For reproducible production runs, use the release installer above. When running from a source checkout, `metadata.json` also records the Git commit and whether the working tree was dirty.
 
 ## Limitations
 
@@ -185,7 +223,7 @@ For reproducible production runs, use a clean version-controlled commit; `metada
 ## Development tests
 
 ```bash
-uv run pytest -q
+uv run --frozen --extra dev --extra macs3 pytest -q
 ```
 
 The test suite includes hand-calculated formula cases, zero-count behavior, read/fragment filtering on a synthetic BAM, edge padding, summit-centered exact-width coordinates and invalid-summit handling, consensus support, output schema, thread invariance, and an end-to-end tiny-data smoke test.
