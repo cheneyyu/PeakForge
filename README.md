@@ -1,30 +1,30 @@
 # PeakForge
 
+Python-native differential peak analysis with replicates and exploratory single-pair ranking.
+
 ## Google Colab
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/cheneyyu/PeakForge/blob/main/colab/PeakForge_Colab_Quickstart.ipynb)
 
-We provide [example workflows on GitHub](https://github.com/cheneyyu/PeakForge/tree/main/example), including ENCODE MYC ChIP-seq data downloads, replicate-supported 2-vs-2 analysis, and exploratory 1-vs-1 ranking.
+Try PeakForge in your browser without installing it on your own computer. The notebook walks through setup, data input, both analysis modes, and result inspection. Use the built-in ENCODE download option, upload your own files, or connect Google Drive. See the [Colab guide](colab/README.md) for input options and setup details.
 
-Open the quickstart using the badge above for upload, Google Drive, or direct ENCODE inputs. Its existing installation cell installs the tagged source with pip; it does not apply the dependency lock. See [Colab instructions](colab/README.md).
+## Worked examples
 
-The [release installer below](#install-a-released-version-recommended) is also usable in Colab as an alternative to that installation cell. Install uv and samtools first, run it with `--env /content/peakforge-0.2.3`, then make its commands available to the analysis cells:
+The [example workflows on GitHub](https://github.com/cheneyyu/PeakForge/tree/main/example) compare MYC ChIP-seq profiles between K562 and HepG2 cells using public ENCODE data and matched input controls. They include download scripts, sample metadata, and commands for both analysis modes:
 
-```python
-import os
-os.environ["PATH"] = "/content/peakforge-0.2.3/bin:" + os.environ["PATH"]
-```
+| Example | What it demonstrates | Main results |
+| --- | --- | --- |
+| [Replicated 2-vs-2 analysis](https://github.com/cheneyyu/PeakForge/blob/main/example/run_pipeline.sh) | Differential peak analysis with PyDESeq2 | Effect estimates, P values, adjusted P values, and diagnostic plots |
+| [Exploratory 1-vs-1 analysis](https://github.com/cheneyyu/PeakForge/blob/main/example/run_example_1v1.sh) | Candidate prioritization for a single sample pair | Normalized log2 fold changes, candidate ranks, and ranking plots |
 
-This optional route keeps PeakForge in a separate Python environment without replacing Colab's notebook kernel.
+To see the workflow before running it, [view the notebook and saved result tables on GitHub](https://github.com/cheneyyu/PeakForge/blob/main/colab/PeakForge_Colab_Quickstart.ipynb). The [example walkthrough](https://github.com/cheneyyu/PeakForge/blob/main/example/README.md) provides download commands and expected output locations, plus optional held-out and peak-shape examples. BAM files are downloaded on demand rather than stored in the repository.
 
-## Overview
+## Analysis modes
 
-PeakForge is a Python-native toolkit for two-group differential analysis of narrow-peak chromatin profiles. It implements two evidence levels:
+PeakForge supports two-group comparisons with two distinct interpretations:
 
 - Replicate-supported mode uses PyDESeq2 and is the formal inferential mode. It reports `pvalue`, `padj`, and differential-peak calls.
 - Exact `1 vs 1` mode cannot estimate biological variability. It reports exploratory candidate rankings led by library-size-normalized log2 fold change, with a MARS-derived score and explicitly labelled sampling-model diagnostics.
-
-The tested scope of this release is transcription-factor ChIP-seq and replicated ATAC-seq with narrow peaks. CUT&Tag and broad-peak files may be accepted technically, but their performance has not been systematically validated. PeakForge currently supports simple two-group contrasts only; it does not fit paired terms, batches, covariates, interactions, or arbitrary design matrices.
 
 ## Installation
 
@@ -54,18 +54,21 @@ The installer needs Python 3.10+ and defaults to an isolated Python 3.12 environ
 
 Release downloads and Python package artifacts are SHA-256 checked. The environment retains `peakforge-uv.lock`, `peakforge-requirements.txt`, and `peakforge-install.json`. Runtime Python dependencies are pinned; `samtools` and system build tools are supplied separately. Each analysis also records detected versions in `metadata.json`.
 
-### Development checkout
+<details>
+<summary>Optional: locked-dependency installation in Colab</summary>
 
-For development or running repository tests, use the source checkout instead:
+The quickstart's saved installation cell installs the tagged source with pip; it does not apply the dependency lock. To use locked Python dependencies in Colab instead, install uv and samtools, then run the release installer above with `--env /content/peakforge-0.2.3`. Make its commands available to the notebook:
 
-```bash
-git clone https://github.com/cheneyyu/PeakForge.git
-cd PeakForge
-uv sync --frozen --extra macs3 --extra dev
-uv run --frozen peakforge --help
+```python
+import os
+os.environ["PATH"] = "/content/peakforge-0.2.3/bin:" + os.environ["PATH"]
 ```
 
-The examples below assume the release environment has been activated. In a development checkout, prefix commands with `uv run --frozen`.
+This optional route uses a separate Python environment without replacing Colab's notebook kernel. Use it in place of the notebook's installation cell.
+
+</details>
+
+The command-line examples below assume the release environment has been activated. For a source checkout, see [Development and tests](#development-and-tests).
 
 ## Inputs
 
@@ -215,20 +218,28 @@ Every run writes `metadata.json` containing:
 
 For reproducible production runs, use the release installer above. When running from a source checkout, `metadata.json` also records the Git commit and whether the working tree was dirty.
 
-## Limitations
+## Scope and limitations
+
+The tested scope of this release is transcription-factor ChIP-seq and replicated ATAC-seq with narrow peaks. CUT&Tag and broad-peak files may be accepted technically, but their performance has not been systematically validated.
 
 - Replicate-supported inference requires at least two biological replicates in both groups.
 - Exploratory mode requires exactly one sample in each group; mixed `1 vs N` designs are rejected.
 - Pairing, batches, covariates, interactions, and general design matrices are not supported.
 - Tn5 insertion-site quantification is not supported.
-- CUT&Tag and broad-peak performance are not validated in the current release.
 - Single-pair sampling-model p/q values are non-inferential diagnostics.
 
-## Development tests
+## Development and tests
+
+For development or running repository tests, create a source-checkout environment:
 
 ```bash
+git clone https://github.com/cheneyyu/PeakForge.git
+cd PeakForge
+uv sync --frozen --extra macs3 --extra dev
 uv run --frozen --extra dev --extra macs3 pytest -q
 ```
+
+Run CLI commands in this environment with `uv run --frozen peakforge ...`.
 
 The test suite includes hand-calculated formula cases, zero-count behavior, read/fragment filtering on a synthetic BAM, edge padding, summit-centered exact-width coordinates and invalid-summit handling, consensus support, output schema, thread invariance, and an end-to-end tiny-data smoke test.
 
